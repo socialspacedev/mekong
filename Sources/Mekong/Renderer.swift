@@ -95,9 +95,43 @@ final class VisualView: MTKView, MTKViewDelegate {
 
     required init(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    private var restartObservers: [NSObjectProtocol] = []
+
+    /// The view's display link can stall after a lock, sleep/wake or a move to
+    /// another display, leaving a frozen or black preview. Kick it on each.
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        restartObservers.forEach { NotificationCenter.default.removeObserver($0); NSWorkspace.shared.notificationCenter.removeObserver($0) }
+        restartObservers = []
+        guard let window else { return }
+        let kick: (Notification) -> Void = { [weak self] _ in
+            MainActor.assumeIsolated { self?.restartDrawing() }
+        }
+        restartObservers = [
+            NotificationCenter.default.addObserver(forName: NSWindow.didChangeScreenNotification,
+                                                   object: window, queue: .main, using: kick),
+            NotificationCenter.default.addObserver(forName: NSWindow.didChangeOcclusionStateNotification,
+                                                   object: window, queue: .main, using: kick),
+            NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.screensDidWakeNotification,
+                                                              object: nil, queue: .main, using: kick),
+            NSWorkspace.shared.notificationCenter.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification,
+                                                              object: nil, queue: .main, using: kick),
+        ]
+    }
+
+    private func restartDrawing() {
+        isPaused = true
+        isPaused = false
+    }
+
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {}
 
+    private var dbgLast: CFTimeInterval = 0
     func draw(in view: MTKView) {
+        if ProcessInfo.processInfo.environment["MEKONG_DEBUG"] != nil, CACurrentMediaTime() - dbgLast > 1 {
+            dbgLast = CACurrentMediaTime()
+            FileHandle.standardError.write("draw fps=\(preferredFramesPerSecond) bounds=\(bounds.size) drawable=\(drawableSize) pass=\(currentRenderPassDescriptor != nil) paused=\(isPaused) win=\(window != nil) level=\(engine.u.level) onset=\(engine.u.onset) master=\(engine.u.master) scene=\(engine.u.sceneA) seed=\(engine.u.seed)\n".data(using: .utf8)!)
+        }
         MainActor.assumeIsolated { engine.step(now: CACurrentMediaTime()) }
         guard let pass = currentRenderPassDescriptor, let drawable = currentDrawable,
               let cb = MetalStage.shared.queue.makeCommandBuffer() else { return }

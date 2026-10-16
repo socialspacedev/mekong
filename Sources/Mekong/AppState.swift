@@ -32,6 +32,12 @@ final class AppState: ObservableObject {
             .sink { [weak self] on in self?.power.setKeepAwake(on) }
             .store(in: &bag)
 
+        // Menus are built from AppState, so pass the stage's changes through
+        // (otherwise "Present" never flips to "Stop Presenting").
+        stage.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &bag)
+
         installKeys()
     }
 
