@@ -39,6 +39,14 @@ enum Snapshot {
                   to: (dir as NSString).appendingPathComponent(String(format: "mekong-%02d-%@.png", i + 1, slug)))
         }
 
+        // Ribbons played softly and hard, to check it follows dynamics.
+        if let ribbons = library.entry(SceneKind.ribbons.key) {
+            for (label, level) in [("ribbons-soft", Float(0.2)), ("ribbons-hard", Float(0.9))] {
+                write(engine, scene: ribbons, presence: nil, level: level,
+                      to: (dir as NSString).appendingPathComponent("mekong-\(label).png"))
+            }
+        }
+
         // The CRT collapse, part way: line phase and dot phase.
         if let grid = library.entry(SceneKind.grid.key) {
             for (label, presence) in [("crt-line", Float(0.55)), ("crt-dot", Float(0.12))] {
@@ -48,8 +56,10 @@ enum Snapshot {
         }
     }
 
-    private static func write(_ engine: VisualEngine, scene: SceneEntry, presence: Float?, to path: String) {
+    private static func write(_ engine: VisualEngine, scene: SceneEntry, presence: Float?,
+                              level: Float? = nil, to path: String) {
         var u = engine.u
+        if let level { u.level = level }
         u.width = 1280; u.height = 720
         u.sceneA = Float(scene.code); u.sceneB = Float(scene.code); u.mixAB = 0
         if let presence { u.presence = presence }

@@ -188,11 +188,11 @@ final class AudioAnalyzer: @unchecked Sendable {
 
         let reference: Float
         if p.autoLevel {
-            // Follow the loudest recent playing, letting go at 3 dB/s, but
-            // never chase below -50 dB or silence gets amplified into noise.
-            // Never chase far below the gate, or room noise gets amplified
-            // into activity.
-            peakDb = max(rmsDb, peakDb - 3 * hopSeconds, p.gateDb + 24)
+            // Follow the loudest recent playing, letting go at 1 dB/s so a soft
+            // passage stays visibly softer for half a minute or so instead of
+            // being turned back up within seconds. Never chase far below the
+            // gate, or room noise gets amplified into activity.
+            peakDb = max(rmsDb, peakDb - 1 * hopSeconds, p.gateDb + 24)
             reference = peakDb + 3
         } else {
             reference = -6 - p.gainDb

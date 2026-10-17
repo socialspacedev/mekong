@@ -224,7 +224,10 @@ enum Shaders {
     }
 
     // 5 — Ribbons: vertical streaks of coloured light flying outward from
-    // the centre in perspective, brightened by their band, surging on attacks.
+    // the centre in perspective, surging on attacks. Loudness decides how
+    // many ribbons there are, how bright and how wide: soft playing leaves a
+    // few faint threads, hard playing fills the wall. (Bands are relative to
+    // their own recent peak, so they shape colour and shimmer, not dynamics.)
     float3 ribbons(float2 px, constant U& u, constant float* b) {
         float k = u.height / 1080.0;
         float cx = u.width * 0.5;
@@ -235,14 +238,17 @@ enum Shaders {
             float side = h11(fi * 9.1) > 0.5 ? 1.0 : -1.0;
             float persp = z * z * z;
             float x = cx + side * (0.01 + persp) * u.width * 0.6 * (0.4 + 0.6 * h11(fi * 5.5));
-            float w = (0.6 + 22.0 * persp) * k * (0.5 + h11(fi * 2.2));
+            float w = (0.6 + 22.0 * persp) * k * (0.5 + h11(fi * 2.2)) * (0.5 + 1.0 * u.level);
             float d = (px.x - x) / w;
             float d2 = d * d;
             if (d2 > 30.0) continue;
+            float rank = h11(fi * 7.7 + 0.3);
+            float visible = smoothstep(rank, rank + 0.15, 0.08 + 0.97 * u.level);
+            if (visible <= 0.0) continue;
             float bv = band(b, fi);
             float fade = smoothstep(0.0, 0.15, z) * (1.0 - smoothstep(0.85, 1.0, z));
             float surge = u.onset * step(0.55, h11(fi + u.seed));
-            float amp = fade * (0.3 + 1.3 * bv + 0.9 * surge);
+            float amp = fade * visible * (0.2 + 0.9 * u.level + 1.0 * bv * (0.3 + 0.7 * u.level) + 0.9 * surge);
             float hcol = h11(fi * 1.9 + 0.4);
             float3 hue = 0.5 + 0.5 * cos(6.28318 * (hcol * 0.75 + float3(0.0, 0.33, 0.67) + 0.85));
             col += hue * exp(-d2) * amp * 0.55 + exp(-d2 * 10.0) * amp * 0.2;

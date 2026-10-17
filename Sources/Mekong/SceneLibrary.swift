@@ -13,9 +13,13 @@ struct SceneEntry: Identifiable, Equatable {
     let source: Source
     let code: Int           // dispatch code passed to the shader
     let texture: MTLTexture?
+    var file: String? = nil // in the Scenes folder, for shader and image scenes
+    var style = 0           // image scenes: index into SceneLibrary.styleNames
+    var mono = false        // image scenes
 
     static func == (a: SceneEntry, b: SceneEntry) -> Bool {
         a.id == b.id && a.code == b.code && a.texture === b.texture && a.blurb == b.blurb
+            && a.name == b.name && a.style == b.style && a.mono == b.mono
     }
 }
 
@@ -46,6 +50,7 @@ final class SceneLibrary: ObservableObject {
             .appendingPathComponent("Mekong/Scenes", isDirectory: true)
 
     private var signature = ""
+    private var generation = 0
     private var timer: Timer?
 
     nonisolated static let imageExtensions: Set<String> = ["png", "jpg", "jpeg", "heic", "tif", "tiff", "gif", "webp", "bmp"]
@@ -80,6 +85,72 @@ final class SceneLibrary: ObservableObject {
 
     func reloadNow() { reload(sync: false) }
 
+    // MARK: - Managing scenes from the console
+
+    static let addableTypes = imageExtensions.union(["metal"])
+
+    /// Copies pictures / .metal files into the folder (never moves the
+    /// originals). Returns the ids of the new scenes.
+    @discardableResult
+    func add(_ urls: [URL]) -> [String] {
+        createFolderIfNeeded()
+        var added: [String] = []
+        for url in urls where Self.addableTypes.contains(url.pathExtension.lowercased()) {
+            let ext = url.pathExtension
+            let base = url.deletingPathExtension().lastPathComponent
+            var name = url.lastPathComponent
+            var n = 2
+            while FileManager.default.fileExists(atPath: folder.appendingPathComponent(name).path) {
+                name = "\(base) \(n).\(ext)"; n += 1
+            }
+            do {
+                try FileManager.default.copyItem(at: url, to: folder.appendingPathComponent(name))
+                added.append(ext.lowercased() == "metal" ? "shader:\(name)" : "image:\(name)")
+            } catch {
+                issues[url.lastPathComponent] = "Couldn't add: \(error.localizedDescription)"
+            }
+        }
+        if !added.isEmpty { reload(sync: false) }
+        return added
+    }
+
+    /// Writes an image scene's settings to its .json beside the image.
+    func update(_ entry: SceneEntry, name: String? = nil, style: Int? = nil, mono: Bool? = nil) {
+        guard entry.source == .image, let file = entry.file else { return }
+        let sidecar = folder.appendingPathComponent(file).deletingPathExtension().appendingPathExtension("json")
+        var cfg = (try? Data(contentsOf: sidecar)).flatMap { try? JSONDecoder().decode(ImageConfig.self, from: $0) }
+            ?? ImageConfig()
+        if let name {
+            let trimmed = name.trimmingCharacters(in: .whitespaces)
+            cfg.name = trimmed.isEmpty || trimmed == Self.title(file) ? nil : trimmed
+        }
+        if let style { cfg.style = Self.styleNames[style] }
+        if let mono { cfg.mono = mono }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try? encoder.encode(cfg).write(to: sidecar)
+        reload(sync: false)
+    }
+
+    /// Moves the scene's file (and an image's .json) to the Trash.
+    func remove(_ entry: SceneEntry) {
+        guard let file = entry.file else { return }
+        let url = folder.appendingPathComponent(file)
+        var urls = [url]
+        if entry.source == .image {
+            let sidecar = url.deletingPathExtension().appendingPathExtension("json")
+            if FileManager.default.fileExists(atPath: sidecar.path) { urls.append(sidecar) }
+        }
+        NSWorkspace.shared.recycle(urls) { _, _ in
+            Task { @MainActor in self.reload(sync: false) }
+        }
+    }
+
+    func reveal(_ entry: SceneEntry) {
+        guard let file = entry.file else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([folder.appendingPathComponent(file)])
+    }
+
     // MARK: - Loading
 
     private func checkForChanges() {
@@ -105,9 +176,13 @@ final class SceneLibrary: ObservableObject {
             return
         }
         isReloading = true
+        generation += 1
+        let mine = generation
         Task.detached(priority: .userInitiated) {
             let result = Result { try Self.build(customs: customs, images: images, folder: folder) }
             await MainActor.run {
+                // A newer rebuild started meanwhile: let that one win.
+                guard mine == self.generation else { return }
                 self.apply(result)
                 self.isReloading = false
             }
@@ -174,7 +249,8 @@ final class SceneLibrary: ObservableObject {
                 entries.append(SceneEntry(id: "shader:\(c.file)",
                                           name: meta.name ?? Self.title(c.file),
                                           blurb: meta.blurb ?? "Custom scene from \(c.file).",
-                                          source: .shader, code: Shaders.Code.custom(index), texture: nil))
+                                          source: .shader, code: Shaders.Code.custom(index), texture: nil,
+                                          file: c.file))
             } catch {
                 issues[c.file] = Self.firstError(error)
             }
@@ -202,7 +278,7 @@ final class SceneLibrary: ObservableObject {
                                           blurb: cfg.description ?? "Image scene, \(styleName)\(cfg.mono == true ? ", monochrome" : "").",
                                           source: .image,
                                           code: Shaders.Code.image(style: style ?? 0, mono: cfg.mono == true),
-                                          texture: texture))
+                                          texture: texture, file: f, style: style ?? 0, mono: cfg.mono == true))
             }
         }
 
@@ -215,7 +291,7 @@ final class SceneLibrary: ObservableObject {
         return Built(pipeline: pipeline, entries: entries, issues: issues)
     }
 
-    struct ImageConfig: Decodable {
+    struct ImageConfig: Codable {
         var name: String?
         var description: String?
         var style: String?

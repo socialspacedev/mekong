@@ -4,6 +4,9 @@ enum CustomScenesGuide {
     MEKONG — YOUR OWN SCENES
     ========================
 
+    Easiest: use "Add scene…" in Mekong's console, or drag files onto the scene
+    list. You can set an image's name, style and black-and-white there too.
+
     Anything you put in this folder shows up in Mekong's scene list within a
     second or so. No rebuild, no restart. Edit a file while it's on the wall
     and the change appears straight away. Delete a file to remove its scene.
@@ -14,7 +17,9 @@ enum CustomScenesGuide {
     Drop in a picture (PNG, JPEG, HEIC, TIFF, GIF, WebP). It becomes a scene,
     played by the sound in the "drift" style.
 
-    To choose a style or name, add a JSON file with the same name beside it.
+    To choose a style or name, select the scene in Mekong and use the controls
+    under the scene list. (They save a JSON file with the same name beside the
+    image, which you can also write by hand.)
     For "lambeth.jpg" that's "lambeth.json":
 
         {

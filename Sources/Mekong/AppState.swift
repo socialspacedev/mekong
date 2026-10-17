@@ -62,7 +62,9 @@ final class AppState: ObservableObject {
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             MainActor.assumeIsolated {
                 guard let self,
-                      event.modifierFlags.intersection([.command, .control, .option]).isEmpty
+                      event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+                      // Typing a scene name shouldn't switch scenes or black out.
+                      !(NSApp.keyWindow?.firstResponder is NSText)
                 else { return event }
                 switch event.keyCode {
                 case 53:  // Esc

@@ -1,4 +1,5 @@
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// The single console window: live preview and signal readout on the left,
 /// every control in one column on the right.
@@ -8,6 +9,7 @@ struct ConsoleView: View {
     @EnvironmentObject private var stage: StageController
     @ObservedObject private var settings = AppSettings.shared
     @ObservedObject private var library = SceneLibrary.shared
+    @State private var dropTargeted = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -139,6 +141,12 @@ struct ConsoleView: View {
                     sceneTile(scene, index: i)
                 }
             }
+            .padding(4)
+            .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Theme.accent, style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
+                .opacity(dropTargeted ? 1 : 0))
+            .padding(-4)
+            .onDrop(of: [.fileURL], isTargeted: $dropTargeted, perform: handleDrop)
             if let current = library.entry(settings.prefs.sceneKey) {
                 caption(current.blurb)
             }
@@ -158,23 +166,20 @@ struct ConsoleView: View {
         }
     }
 
-    /// The Scenes folder: open it, and see any file that didn't load.
+    /// Adding, tuning and removing your own scenes — no Finder needed.
     private var yourScenes: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
-                Button { library.openFolder() } label: {
-                    Label("Your scenes folder", systemImage: "folder")
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 10).padding(.vertical, 6)
-                        .cardSurface(Theme.surface, radius: 7)
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(Theme.textSecondary)
-                if library.isReloading {
-                    ProgressView().controlSize(.small)
-                }
+                smallButton("Add scene…", "plus") { addScenes() }
+                smallButton("Folder", "folder") { library.openFolder() }
+                if library.isReloading { ProgressView().controlSize(.small) }
             }
-            caption("Drop in images or .metal files and they appear here as scenes — see README.txt in the folder.")
+            caption("Add a picture to play it as a scene, or a .metal file for a fully custom one. You can also drag files onto the scene list.")
+
+            if let entry = library.entry(settings.prefs.sceneKey), entry.source != .builtin {
+                CustomSceneEditor(entry: entry, library: library)
+            }
+
             ForEach(library.issues.keys.sorted(), id: \.self) { file in
                 VStack(alignment: .leading, spacing: 2) {
                     Text(file).font(.system(size: 11, weight: .medium))
@@ -187,6 +192,44 @@ struct ConsoleView: View {
             }
         }
         .padding(.top, 4)
+    }
+
+    private func smallButton(_ title: String, _ icon: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Label(title, systemImage: icon)
+                .font(.system(size: 12))
+                .padding(.horizontal, 10).padding(.vertical, 6)
+                .cardSurface(Theme.surface, radius: 7)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(Theme.textSecondary)
+    }
+
+    private func addScenes() {
+        let panel = NSOpenPanel()
+        panel.title = "Add scenes"
+        panel.prompt = "Add"
+        panel.allowsMultipleSelection = true
+        panel.canChooseDirectories = false
+        panel.allowedContentTypes = SceneLibrary.addableTypes.compactMap { UTType(filenameExtension: $0) }
+        guard panel.runModal() == .OK else { return }
+        add(panel.urls)
+    }
+
+    private func add(_ urls: [URL]) {
+        if let first = library.add(urls).first { settings.prefs.sceneKey = first }
+    }
+
+    private func handleDrop(_ providers: [NSItemProvider]) -> Bool {
+        let fileProviders = providers.filter { $0.canLoadObject(ofClass: URL.self) }
+        guard !fileProviders.isEmpty else { return false }
+        for provider in fileProviders {
+            _ = provider.loadObject(ofClass: URL.self) { url, _ in
+                guard let url else { return }
+                Task { @MainActor in add([url]) }
+            }
+        }
+        return true
     }
 
     private func sceneTile(_ scene: SceneEntry, index: Int) -> some View {
@@ -419,5 +462,70 @@ struct SignalStrip: View {
             .padding(.vertical, 4)
         }
         .frame(maxWidth: .infinity)
+    }
+}
+
+/// Settings for the selected custom scene: name, style and monochrome for a
+/// picture; reveal or remove for either kind.
+struct CustomSceneEditor: View {
+    let entry: SceneEntry
+    @ObservedObject var library: SceneLibrary
+    @State private var name = ""
+    @State private var confirmRemove = false
+    @FocusState private var editingName: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 6) {
+                Image(systemName: entry.source == .image ? "photo" : "curlybraces")
+                    .font(.system(size: 10))
+                Text(entry.file ?? entry.name).font(Theme.mono(10)).lineLimit(1).truncationMode(.middle)
+            }
+            .foregroundStyle(Theme.textTertiary)
+
+            if entry.source == .image {
+                TextField("Name", text: $name)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 8).padding(.vertical, 6)
+                    .cardSurface(Theme.surfaceHi, radius: 6)
+                    .focused($editingName)
+                    .onSubmit { library.update(entry, name: name) }
+                    .onChange(of: editingName) { _, editing in
+                        if !editing, name != entry.name { library.update(entry, name: name) }
+                    }
+
+                Picker("", selection: Binding(get: { entry.style },
+                                              set: { library.update(entry, style: $0) })) {
+                    ForEach(Array(SceneLibrary.styleNames.enumerated()), id: \.offset) { i, style in
+                        Text(style.capitalized).tag(i)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+
+                Toggle("Black and white (follows the palette)",
+                       isOn: Binding(get: { entry.mono }, set: { library.update(entry, mono: $0) }))
+                    .toggleStyle(.switch).controlSize(.small)
+                    .font(.system(size: 12))
+            }
+
+            HStack(spacing: 14) {
+                Button("Show in Finder") { library.reveal(entry) }
+                Button("Remove scene…") { confirmRemove = true }
+            }
+            .buttonStyle(.link)
+            .font(.system(size: 11))
+        }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardSurface(Theme.surface, radius: 8)
+        .onAppear { name = entry.name }
+        .onChange(of: entry.id) { _, _ in name = entry.name }
+        .confirmationDialog("Remove “\(entry.name)”?", isPresented: $confirmRemove) {
+            Button("Move to Trash", role: .destructive) { library.remove(entry) }
+        } message: {
+            Text("The file goes to the Trash, so you can get it back from there.")
+        }
     }
 }

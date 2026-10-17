@@ -119,7 +119,9 @@ final class VisualEngine {
             let others = library.entries.map(\.id).filter { $0 != p.sceneKey }
             settings.prefs.sceneKey = others.randomElement() ?? SceneKind.barcode.key
         }
-        let wanted = library.entry(settings.prefs.sceneKey) ?? library.entries[0]
+        // A scene that's just been added may still be compiling: stay on the
+        // current one until it exists.
+        let wanted = library.entry(settings.prefs.sceneKey) ?? targetScene ?? library.entries[0]
         currentScene = currentScene.flatMap { library.entry($0.id) } ?? wanted
         targetScene = targetScene.flatMap { library.entry($0.id) } ?? wanted
         if wanted.id != targetScene?.id {
