@@ -40,9 +40,11 @@ struct MekongApp: App {
                     app.blackout.toggle()
                 }
                 Divider()
-                ForEach(SceneKind.allCases) { scene in
-                    Button("\(scene.name) (\(scene.rawValue + 1))") { app.selectScene(scene.rawValue) }
+                ForEach(Array(app.library.entries.enumerated()), id: \.element.id) { i, scene in
+                    Button(i < 9 ? "\(scene.name) (\(i + 1))" : scene.name) { app.selectScene(i) }
                 }
+                Divider()
+                Button("Open Scenes Folder") { app.library.openFolder() }
             }
         }
     }

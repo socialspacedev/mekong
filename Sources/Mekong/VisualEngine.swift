@@ -1,5 +1,6 @@
 import Foundation
 import QuartzCore
+import Metal
 
 /// Must match `struct U` in Shaders.swift field for field — 24 Floats.
 struct Uniforms {
@@ -20,6 +21,7 @@ struct Uniforms {
 final class VisualEngine {
     private let analyzer: AudioAnalyzer
     private let settings: AppSettings
+    private let library: SceneLibrary
 
     private(set) var u = Uniforms()
     private(set) var bands = [Float](repeating: 0, count: AudioAnalyzer.bandCount)
@@ -37,12 +39,18 @@ final class VisualEngine {
     private var lastFlash: CFTimeInterval = -10
     private var lastSound: CFTimeInterval = -10
     private var lastSceneChange: CFTimeInterval = 0
-    private var currentScene = -1
-    private var targetScene = 0
+    private var currentScene: SceneEntry?
+    private var targetScene: SceneEntry?
 
-    init(analyzer: AudioAnalyzer, settings: AppSettings) {
+    /// Images for the two scenes being drawn (nil for non-image scenes).
+    var textureA: MTLTexture? { currentScene?.texture }
+    var textureB: MTLTexture? { targetScene?.texture }
+    var pipeline: MTLRenderPipelineState { library.pipeline }
+
+    init(analyzer: AudioAnalyzer, settings: AppSettings, library: SceneLibrary) {
         self.analyzer = analyzer
         self.settings = settings
+        self.library = library
     }
 
     func step(now: CFTimeInterval) {
@@ -104,26 +112,30 @@ final class VisualEngine {
 
         follow(&u.master, blackout ? 0 : 1, 0.5, 0.5)
 
-        // Scene changes: auto-advance, then crossfade over ~1.2 s.
+        // Scene changes: auto-advance, then crossfade over ~1.2 s. Entries are
+        // looked up fresh every frame, so a scene whose file was edited (new
+        // code or texture) or removed is picked up straight away.
         if p.autoSceneMinutes > 0, now - lastSceneChange > Double(p.autoSceneMinutes) * 60 {
-            let others = SceneKind.allCases.map(\.rawValue).filter { $0 != p.scene }
-            settings.prefs.scene = others.randomElement() ?? 0
+            let others = library.entries.map(\.id).filter { $0 != p.sceneKey }
+            settings.prefs.sceneKey = others.randomElement() ?? SceneKind.barcode.key
         }
-        let wanted = settings.prefs.scene
-        if currentScene < 0 {
-            currentScene = wanted; targetScene = wanted
-        } else if wanted != targetScene {
+        let wanted = library.entry(settings.prefs.sceneKey) ?? library.entries[0]
+        currentScene = currentScene.flatMap { library.entry($0.id) } ?? wanted
+        targetScene = targetScene.flatMap { library.entry($0.id) } ?? wanted
+        if wanted.id != targetScene?.id {
             if u.mixAB > 0 { currentScene = targetScene }
             targetScene = wanted
             u.mixAB = 0.0001
             lastSceneChange = now
         }
-        if targetScene != currentScene {
+        if targetScene?.id != currentScene?.id {
             u.mixAB += dt / 1.2
             if u.mixAB >= 1 { currentScene = targetScene; u.mixAB = 0 }
+        } else {
+            u.mixAB = 0
         }
-        u.sceneA = Float(currentScene)
-        u.sceneB = Float(targetScene)
+        u.sceneA = Float(currentScene?.code ?? 0)
+        u.sceneB = Float(targetScene?.code ?? 0)
 
         u.density = Float(p.density)
         u.intensity = Float(0.25 + 1.0 * p.brightness)
@@ -132,9 +144,9 @@ final class VisualEngine {
     }
 
     /// Jump straight to a scene with no crossfade (snapshot rendering).
-    func force(scene: Int) {
+    func force(scene: SceneEntry) {
         currentScene = scene; targetScene = scene; u.mixAB = 0
-        u.sceneA = Float(scene); u.sceneB = Float(scene)
+        u.sceneA = Float(scene.code); u.sceneB = Float(scene.code)
     }
 
     private func avg(_ r: Range<Int>) -> Float {

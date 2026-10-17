@@ -6,6 +6,7 @@ final class AppState: ObservableObject {
     static let shared = AppState()
 
     let settings = AppSettings.shared
+    let library = SceneLibrary.shared
     let input: AudioInput
     let engine: VisualEngine
     let stage: StageController
@@ -20,7 +21,8 @@ final class AppState: ObservableObject {
 
     private init() {
         input = AudioInput()
-        engine = VisualEngine(analyzer: input.analyzer, settings: settings)
+        library.start()
+        engine = VisualEngine(analyzer: input.analyzer, settings: settings, library: library)
         stage = StageController(engine: engine)
 
         settings.$prefs.map(\.deviceUID).removeDuplicates()
@@ -37,6 +39,9 @@ final class AppState: ObservableObject {
         stage.objectWillChange
             .sink { [weak self] _ in self?.objectWillChange.send() }
             .store(in: &bag)
+        library.objectWillChange
+            .sink { [weak self] _ in self?.objectWillChange.send() }
+            .store(in: &bag)
 
         installKeys()
     }
@@ -45,9 +50,10 @@ final class AppState: ObservableObject {
         stage.isPresenting ? stage.stop() : stage.present(on: settings.prefs.displayID)
     }
 
+    /// By position in the scene list (number keys 1–9).
     func selectScene(_ index: Int) {
-        guard SceneKind(rawValue: index) != nil else { return }
-        settings.prefs.scene = index
+        guard library.entries.indices.contains(index) else { return }
+        settings.prefs.sceneKey = library.entries[index].id
     }
 
     /// Single keys, no modifiers — hands are on the guitar, so these need to
@@ -69,7 +75,7 @@ final class AppState: ObservableObject {
                     break
                 }
                 switch event.charactersIgnoringModifiers?.lowercased() {
-                case "1", "2", "3", "4", "5", "6":
+                case "1", "2", "3", "4", "5", "6", "7", "8", "9":
                     self.selectScene(Int(event.charactersIgnoringModifiers!)! - 1)
                     return nil
                 case "p":

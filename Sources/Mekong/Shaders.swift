@@ -10,7 +10,9 @@
 /// Over everything sits the CRT presence: in silence the picture collapses to
 /// a horizontal line, then a dot, then black, and opens the same way back.
 enum Shaders {
-    static let source = """
+    /// Types, the vertex stage and helpers every scene can use, including
+    /// scenes from the Scenes folder.
+    static let prelude = """
     #include <metal_stdlib>
     using namespace metal;
 
@@ -66,6 +68,19 @@ enum Shaders {
         float3(0.40, 0.80, 0.85), float3(0.95, 0.55, 0.65), float3(0.05, 0.05, 0.06)
     };
 
+
+    // Palette for single-value (monochrome) scenes: White, Tint or Inverted.
+    // Custom scenes can call it too: `return mono(v, u);`
+    inline float3 mono(float v, constant U& u) {
+        v = clamp(v * u.intensity, 0.0, 1.0);
+        if (u.palette > 1.5) return float3(1.0 - v);
+        if (u.palette > 0.5) return v * float3(0.55, 0.86, 0.96);
+        return float3(v);
+    }
+    """
+
+    /// The built-in scenes and the image-scene styles.
+    static let builtins = """
     // 0 — Barcode: horizontal strata of hashed vertical lines.
     float barcode(float2 px, constant U& u, constant float* b) {
         float2 res = float2(u.width, u.height);
@@ -236,8 +251,93 @@ enum Shaders {
         return 1.0 - exp(-col * 1.4);
     }
 
-    float3 shade(int s, float2 px, constant U& u, constant float* b) {
-        if (s == 4) return scratch(px, u, b) * u.intensity;
+
+    // 2xx — Image scenes: a picture from the Scenes folder, cover-fitted and
+    // played by the sound in one of four styles. +10 = drawn in monochrome.
+    constexpr sampler imageSampler(filter::linear, address::clamp_to_edge);
+
+    inline float3 imageAt(texture2d<float> t, float2 uv) {
+        return t.sample(imageSampler, uv).rgb;
+    }
+
+    float3 imageScene(int code, float2 px, constant U& u, constant float* b, texture2d<float> t) {
+        float k = u.height / 1080.0;
+        float2 res = float2(u.width, u.height);
+        float2 uv0 = px / res;
+        float ia = float(t.get_width()) / max(float(t.get_height()), 1.0);
+        float sa = res.x / res.y;
+        float2 uv = uv0;
+        if (sa > ia) uv.y = (uv0.y - 0.5) * ia / sa + 0.5;
+        else uv.x = (uv0.x - 0.5) * sa / ia + 0.5;
+        int style = code % 10;
+        bool monochrome = (code / 10) % 10 == 1;
+        float3 col;
+
+        if (style == 1) {
+            // Slices: vertical strips that slip with their band and scatter on attacks.
+            float n = floor(mix(8.0, 96.0, u.density));
+            float i = floor(uv0.x * n);
+            float bv = band(b, i);
+            float dy = (h11(i + u.seed) - 0.5) * 0.18 * u.onset + (bv - 0.3) * 0.06 * (h11(i * 1.7) > 0.5 ? 1.0 : -1.0);
+            float show = step(h11(i * 3.1 + floor(u.tick)), 0.35 + 0.8 * u.level);
+            col = imageAt(t, uv + float2(0.0, dy)) * show * (0.4 + 0.9 * bv);
+        } else if (style == 2) {
+            // Scan: one-bit, thresholded by loudness, rows torn sideways by attacks.
+            float row = floor(px.y / (3.0 * k));
+            float2 suv = uv + float2((h11(row + u.seed) - 0.5) * 0.06 * u.onset, 0.0);
+            float lum = dot(imageAt(t, suv), float3(0.299, 0.587, 0.114));
+            float grain = (h21(floor(px / (2.0 * k)) + floor(u.time * 12.0)) - 0.5) * 0.15;
+            float bit = step(1.0 - (0.25 + 0.6 * u.level), lum + grain);
+            col = float3(bit * step(1.0 * k, fmod(px.y, 3.0 * k)));
+        } else if (style == 3) {
+            // Mosaic: the picture as a grid of cells, lit by their row's band.
+            float cell = max(4.0, floor(mix(48.0, 8.0, u.density) * k));
+            float2 g = floor(px / cell);
+            float2 f = fract(px / cell);
+            float2 cuv = (g + 0.5) * cell / res;
+            if (sa > ia) cuv.y = (cuv.y - 0.5) * ia / sa + 0.5; else cuv.x = (cuv.x - 0.5) * sa / ia + 0.5;
+            float sq = step(0.12, f.x) * step(f.x, 0.88) * step(0.12, f.y) * step(f.y, 0.88);
+            col = imageAt(t, cuv) * sq * (0.2 + 1.1 * band(b, g.y) + 0.6 * u.onset * step(0.7, h21(g + u.seed)));
+        } else {
+            // Drift: slow zoom and pan, breathing with level; attacks split the colour.
+            float z = 1.04 + 0.04 * sin(u.scroll * 0.3) + 0.05 * u.level;
+            float2 duv = (uv - 0.5) / z + 0.5 + float2(sin(u.scroll * 0.2), cos(u.scroll * 0.17)) * 0.02;
+            float2 off = float2(0.008 * u.onset, 0.0);
+            col = float3(imageAt(t, duv + off).r, imageAt(t, duv).g, imageAt(t, duv - off).b);
+            col *= 0.3 + 0.8 * u.level;
+        }
+        if (monochrome) return mono(dot(col, float3(0.299, 0.587, 0.114)), u);
+        return col * u.intensity;
+    }
+    """
+
+    /// Dispatch codes passed in `sceneA` / `sceneB`.
+    enum Code {
+        static func custom(_ index: Int) -> Int { 100 + index }
+        static func image(style: Int, mono: Bool) -> Int { 200 + (mono ? 10 : 0) + style }
+    }
+
+    /// One custom scene, wrapped in its own namespace so helper names in
+    /// different files can't collide. `#line` makes compiler errors point at
+    /// the user's own file and line numbers.
+    static func wrap(_ code: String, namespace: String, file: String) -> String {
+        "namespace \(namespace) {\n#line 1 \"\(file)\"\n\(code)\n}\n"
+    }
+
+    /// The complete program: prelude, built-ins, the given custom scenes, the
+    /// dispatch and the fragment stage (CRT presence, crossfade, flash).
+    static func program(customs: [(namespace: String, file: String, code: String)]) -> String {
+        var calls = ""
+        for (i, c) in customs.enumerated() {
+            calls += "if (s == \(Code.custom(i))) return \(c.namespace)::scene(px, u, b) * u.intensity;\n        "
+        }
+        return prelude + builtins
+            + customs.map { wrap($0.code, namespace: $0.namespace, file: $0.file) }.joined()
+            + """
+
+    float3 shade(int s, float2 px, constant U& u, constant float* b, texture2d<float> tex) {
+        if (s >= 200) return imageScene(s - 200, px, u, b, tex);
+        \(calls)if (s == 4) return scratch(px, u, b) * u.intensity;
         if (s == 5) return ribbons(px, u, b) * u.intensity;
         float v;
         switch (s) {
@@ -246,15 +346,14 @@ enum Shaders {
             case 2: v = horizon(px, u, b); break;
             default: v = interference(px, u, b); break;
         }
-        v = clamp(v * u.intensity, 0.0, 1.0);
-        if (u.palette > 1.5) return float3(1.0 - v);
-        if (u.palette > 0.5) return v * float3(0.55, 0.86, 0.96);
-        return float3(v);
+        return mono(v, u);
     }
 
     fragment float4 fmain(VOut in [[stage_in]],
                           constant U& u [[buffer(0)]],
-                          constant float* b [[buffer(1)]]) {
+                          constant float* b [[buffer(1)]],
+                          texture2d<float> texA [[texture(0)]],
+                          texture2d<float> texB [[texture(1)]]) {
         float2 res = float2(u.width, u.height);
         float2 px = floor(in.pos.xy);
         float k = u.height / 1080.0;
@@ -274,8 +373,8 @@ enum Shaders {
         if (abs(d.x) <= halfW && abs(d.y) <= halfH) {
             float2 spx = p >= 1.0 ? px
                        : clamp(floor(c + d / float2(max(sx, 0.001), max(sy, 0.001))), float2(0.0), res - 1.0);
-            col = shade(int(u.sceneA), spx, u, b);
-            if (u.mixAB > 0.0) col = mix(col, shade(int(u.sceneB), spx, u, b), u.mixAB);
+            col = shade(int(u.sceneA), spx, u, b, texA);
+            if (u.mixAB > 0.0) col = mix(col, shade(int(u.sceneB), spx, u, b, texB), u.mixAB);
             col = mix(col, float3(1.0), (1.0 - sy) * 0.85);   // the collapsed beam burns white
         }
         if (p < 1.0) {
@@ -289,4 +388,16 @@ enum Shaders {
         return float4(clamp(col, 0.0, 1.0) * u.master, 1.0);
     }
     """
+    }
+
+    /// Just enough to check one custom scene compiles on its own, so a broken
+    /// file is reported and left out instead of breaking everything.
+    static func probe(_ code: String, file: String) -> String {
+        prelude + wrap(code, namespace: "probe", file: file) + """
+
+    fragment float4 probe_main(VOut in [[stage_in]], constant U& u [[buffer(0)]], constant float* b [[buffer(1)]]) {
+        return float4(probe::scene(in.pos.xy, u, b), 1.0);
+    }
+    """
+    }
 }

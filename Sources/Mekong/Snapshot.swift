@@ -3,12 +3,19 @@ import ImageIO
 import UniformTypeIdentifiers
 
 /// Headless check of the whole chain: synthetic audio → analyser → engine →
-/// shader → PNG, one per scene, 1280×720.
+/// shader → PNG, one per scene (built-in and from the Scenes folder), 1280×720,
+/// plus two frames of the CRT collapse. Also prints any Scenes-folder errors.
 @MainActor
 enum Snapshot {
     static func run(to dir: String) {
+        let library = SceneLibrary.shared
+        library.start(watch: false)
+        for (file, problem) in library.issues.sorted(by: { $0.key < $1.key }) {
+            print("⚠︎ \(file): \(problem)")
+        }
+
         let analyzer = AudioAnalyzer()
-        let engine = VisualEngine(analyzer: analyzer, settings: AppSettings.shared)
+        let engine = VisualEngine(analyzer: analyzer, settings: AppSettings.shared, library: library)
         let signal = TestSignal(analyzer: analyzer)
 
         var now: CFTimeInterval = 1
@@ -23,41 +30,35 @@ enum Snapshot {
         }
 
         advance(4)
-        for scene in SceneKind.allCases {
-            engine.force(scene: scene.rawValue)
+        for (i, scene) in library.entries.enumerated() {
             signal.pluckNow()
             advance(0.1)    // land just after an attack
-            var u = engine.u
-            u.width = 1280
-            u.height = 720
-            u.sceneA = Float(scene.rawValue)
-            u.mixAB = 0
-            let path = (dir as NSString).appendingPathComponent("mekong-\(scene.rawValue + 1)-\(scene.name.lowercased()).png")
-            if let img = MetalStage.shared.image(uniforms: u, bands: engine.bands),
-               let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL,
-                                                          UTType.png.identifier as CFString, 1, nil) {
-                CGImageDestinationAddImage(dest, img, nil)
-                CGImageDestinationFinalize(dest)
-                print(String(format: "%@  level %.2f  onset %.2f  seed %.0f", path, u.level, u.onset, u.seed))
-            }
+            engine.force(scene: scene)
+            let slug = scene.name.lowercased().replacingOccurrences(of: " ", with: "-")
+            write(engine, scene: scene, presence: nil,
+                  to: (dir as NSString).appendingPathComponent(String(format: "mekong-%02d-%@.png", i + 1, slug)))
         }
 
         // The CRT collapse, part way: line phase and dot phase.
-        for (label, presence) in [("crt-line", Float(0.55)), ("crt-dot", Float(0.12))] {
-            var u = engine.u
-            u.width = 1280; u.height = 720
-            u.sceneA = 1; u.mixAB = 0; u.presence = presence
-            write(u, bands: engine.bands, to: (dir as NSString).appendingPathComponent("mekong-\(label).png"))
+        if let grid = library.entry(SceneKind.grid.key) {
+            for (label, presence) in [("crt-line", Float(0.55)), ("crt-dot", Float(0.12))] {
+                write(engine, scene: grid, presence: presence,
+                      to: (dir as NSString).appendingPathComponent("mekong-\(label).png"))
+            }
         }
     }
 
-    private static func write(_ u: Uniforms, bands: [Float], to path: String) {
-        if let img = MetalStage.shared.image(uniforms: u, bands: bands),
-           let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL,
-                                                      UTType.png.identifier as CFString, 1, nil) {
-            CGImageDestinationAddImage(dest, img, nil)
-            CGImageDestinationFinalize(dest)
-            print(path)
-        }
+    private static func write(_ engine: VisualEngine, scene: SceneEntry, presence: Float?, to path: String) {
+        var u = engine.u
+        u.width = 1280; u.height = 720
+        u.sceneA = Float(scene.code); u.sceneB = Float(scene.code); u.mixAB = 0
+        if let presence { u.presence = presence }
+        guard let img = MetalStage.shared.image(pipeline: engine.pipeline, uniforms: u, bands: engine.bands,
+                                                texture: scene.texture),
+              let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL,
+                                                         UTType.png.identifier as CFString, 1, nil) else { return }
+        CGImageDestinationAddImage(dest, img, nil)
+        CGImageDestinationFinalize(dest)
+        print(path)
     }
 }

@@ -7,6 +7,7 @@ struct ConsoleView: View {
     @EnvironmentObject private var input: AudioInput
     @EnvironmentObject private var stage: StageController
     @ObservedObject private var settings = AppSettings.shared
+    @ObservedObject private var library = SceneLibrary.shared
 
     var body: some View {
         HStack(spacing: 0) {
@@ -72,7 +73,7 @@ struct ConsoleView: View {
             hint("P", "present")
             hint("Esc", "stop")
             hint("Space", "blackout")
-            hint("1–6", "scene")
+            hint("1–9", "scene")
         }
     }
 
@@ -134,11 +135,11 @@ struct ConsoleView: View {
             SectionLabel("Scene")
             LazyVGrid(columns: [GridItem(.flexible(), spacing: 8), GridItem(.flexible(), spacing: 8)],
                       spacing: 8) {
-                ForEach(SceneKind.allCases) { scene in
-                    sceneTile(scene)
+                ForEach(Array(library.entries.enumerated()), id: \.element.id) { i, scene in
+                    sceneTile(scene, index: i)
                 }
             }
-            if let current = SceneKind(rawValue: settings.prefs.scene) {
+            if let current = library.entry(settings.prefs.sceneKey) {
                 caption(current.blurb)
             }
             HStack {
@@ -153,20 +154,58 @@ struct ConsoleView: View {
                 .labelsHidden()
                 .fixedSize()
             }
+            yourScenes
         }
     }
 
-    private func sceneTile(_ scene: SceneKind) -> some View {
-        let selected = settings.prefs.scene == scene.rawValue
-        return Button { app.selectScene(scene.rawValue) } label: {
+    /// The Scenes folder: open it, and see any file that didn't load.
+    private var yourScenes: some View {
+        VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
-                Text("\(scene.rawValue + 1)")
+                Button { library.openFolder() } label: {
+                    Label("Your scenes folder", systemImage: "folder")
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .cardSurface(Theme.surface, radius: 7)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.textSecondary)
+                if library.isReloading {
+                    ProgressView().controlSize(.small)
+                }
+            }
+            caption("Drop in images or .metal files and they appear here as scenes — see README.txt in the folder.")
+            ForEach(library.issues.keys.sorted(), id: \.self) { file in
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(file).font(.system(size: 11, weight: .medium))
+                    Text(library.issues[file] ?? "")
+                        .font(Theme.mono(10))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                .foregroundStyle(Theme.alert)
+            }
+        }
+        .padding(.top, 4)
+    }
+
+    private func sceneTile(_ scene: SceneEntry, index: Int) -> some View {
+        let selected = settings.prefs.sceneKey == scene.id
+        return Button { app.selectScene(index) } label: {
+            HStack(spacing: 8) {
+                Text(index < 9 ? "\(index + 1)" : "·")
                     .font(Theme.mono(10))
                     .foregroundStyle(selected ? Theme.accent : Theme.textTertiary)
                 Text(scene.name)
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(selected ? Theme.textPrimary : Theme.textSecondary)
+                    .lineLimit(1)
                 Spacer(minLength: 0)
+                if scene.source != .builtin {
+                    Image(systemName: scene.source == .image ? "photo" : "curlybraces")
+                        .font(.system(size: 9))
+                        .foregroundStyle(Theme.textTertiary)
+                }
             }
             .padding(.horizontal, 10).padding(.vertical, 9)
             .background(selected ? Theme.accentSoft : Theme.surface,

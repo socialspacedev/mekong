@@ -2,13 +2,15 @@ import AppKit
 import Metal
 import MetalKit
 
-/// Shared Metal device, queue and the one pipeline every view draws with.
+/// Shared Metal device and queue. The pipeline itself comes from the scene
+/// library, which rebuilds it when the Scenes folder changes.
 final class MetalStage {
     static let shared = MetalStage()
 
     let device: MTLDevice
     let queue: MTLCommandQueue
-    let pipeline: MTLRenderPipelineState
+    /// Bound when a scene has no image, since the shader always takes two.
+    let blank: MTLTexture
     static let pixelFormat = MTLPixelFormat.bgra8Unorm
 
     private init() {
@@ -18,20 +20,15 @@ final class MetalStage {
         }
         self.device = device
         self.queue = queue
-        do {
-            let lib = try device.makeLibrary(source: Shaders.source, options: nil)
-            let desc = MTLRenderPipelineDescriptor()
-            desc.vertexFunction = lib.makeFunction(name: "vmain")
-            desc.fragmentFunction = lib.makeFunction(name: "fmain")
-            desc.colorAttachments[0].pixelFormat = Self.pixelFormat
-            pipeline = try device.makeRenderPipelineState(descriptor: desc)
-        } catch {
-            fatalError("Shader compile failed: \(error)")
-        }
+        let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
+        td.usage = .shaderRead
+        blank = device.makeTexture(descriptor: td)!
+        var black: UInt32 = 0xFF000000
+        blank.replace(region: MTLRegionMake2D(0, 0, 1, 1), mipmapLevel: 0, withBytes: &black, bytesPerRow: 4)
     }
 
-    func encode(_ pass: MTLRenderPassDescriptor, into cb: MTLCommandBuffer,
-                uniforms: Uniforms, bands: [Float]) {
+    func encode(_ pass: MTLRenderPassDescriptor, into cb: MTLCommandBuffer, pipeline: MTLRenderPipelineState,
+                uniforms: Uniforms, bands: [Float], textureA: MTLTexture?, textureB: MTLTexture?) {
         pass.colorAttachments[0].loadAction = .dontCare
         pass.colorAttachments[0].storeAction = .store
         guard let enc = cb.makeRenderCommandEncoder(descriptor: pass) else { return }
@@ -40,13 +37,15 @@ final class MetalStage {
         enc.setRenderPipelineState(pipeline)
         enc.setFragmentBytes(&u, length: MemoryLayout<Uniforms>.stride, index: 0)
         enc.setFragmentBytes(&b, length: MemoryLayout<Float>.stride * b.count, index: 1)
+        enc.setFragmentTexture(textureA ?? blank, index: 0)
+        enc.setFragmentTexture(textureB ?? blank, index: 1)
         enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
         enc.endEncoding()
     }
 
     /// Renders one frame offscreen — used by `--snapshot` to check the scenes
     /// without a display.
-    func image(uniforms: Uniforms, bands: [Float]) -> CGImage? {
+    func image(pipeline: MTLRenderPipelineState, uniforms: Uniforms, bands: [Float], texture: MTLTexture?) -> CGImage? {
         let w = Int(uniforms.width), h = Int(uniforms.height)
         let td = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: Self.pixelFormat,
                                                           width: w, height: h, mipmapped: false)
@@ -56,7 +55,8 @@ final class MetalStage {
               let cb = queue.makeCommandBuffer() else { return nil }
         let pass = MTLRenderPassDescriptor()
         pass.colorAttachments[0].texture = tex
-        encode(pass, into: cb, uniforms: uniforms, bands: bands)
+        encode(pass, into: cb, pipeline: pipeline, uniforms: uniforms, bands: bands,
+               textureA: texture, textureB: texture)
         if let blit = cb.makeBlitCommandEncoder() {
             blit.synchronize(resource: tex)
             blit.endEncoding()
@@ -138,8 +138,10 @@ final class VisualView: MTKView, MTKViewDelegate {
         var u = MainActor.assumeIsolated { engine.u }
         u.width = Float(drawableSize.width)
         u.height = Float(drawableSize.height)
-        let bands = MainActor.assumeIsolated { engine.bands }
-        MetalStage.shared.encode(pass, into: cb, uniforms: u, bands: bands)
+        MainActor.assumeIsolated {
+            MetalStage.shared.encode(pass, into: cb, pipeline: engine.pipeline, uniforms: u, bands: engine.bands,
+                                     textureA: engine.textureA, textureB: engine.textureB)
+        }
         cb.present(drawable)
         cb.commit()
     }

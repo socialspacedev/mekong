@@ -45,7 +45,7 @@ struct Prefs: Codable, Equatable {
     var attackSensitivity: Double = 0.5
 
     // Scene
-    var scene = 0
+    var sceneKey = "barcode"      // a SceneEntry id: built-in name, "shader:…" or "image:…"
     var autoSceneMinutes = 0      // 0 = stay on the chosen scene
 
     // Look
@@ -77,7 +77,8 @@ final class AppSettings: ObservableObject {
         // Lay saved values over the defaults, so settings saved by an older
         // version (missing newer keys) still load instead of resetting.
         if let data = UserDefaults.standard.data(forKey: Self.key),
-           let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           var saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           Self.migrate(&saved),
            let defaults = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(Prefs())) as? [String: Any],
            let merged = try? JSONSerialization.data(withJSONObject: defaults.merging(saved) { _, new in new }),
            let prefs = try? JSONDecoder().decode(Prefs.self, from: merged) {
@@ -85,5 +86,13 @@ final class AppSettings: ObservableObject {
         } else {
             prefs = Prefs()
         }
+    }
+
+    /// Scenes used to be saved by number; they're saved by key now.
+    private static func migrate(_ saved: inout [String: Any]) -> Bool {
+        if saved["sceneKey"] == nil, let n = saved["scene"] as? Int, let kind = SceneKind(rawValue: n) {
+            saved["sceneKey"] = kind.key
+        }
+        return true
     }
 }
