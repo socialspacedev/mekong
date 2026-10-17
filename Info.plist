@@ -24,6 +24,8 @@
 	<string>14.0</string>
 	<key>NSHighResolutionCapable</key>
 	<true/>
+	<key>NSHumanReadableCopyright</key>
+	<string>Copyright © 2026 Andrew Long. MIT License.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Mekong listens to your instrument so the visuals can respond to what you play. Audio is analysed live and never recorded or sent anywhere.</string>
 	<key>NSPrincipalClass</key>

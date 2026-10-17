@@ -12,3 +12,7 @@ Keys (console focused): **P** present · **Esc** stop · **Space** blackout · *
 - The screensaver and display sleep are held off while presenting.
 - `Mekong --snapshot <dir>` renders each scene from the test signal to PNG (headless check).
 - Your own scenes: drop images or `.metal` files into `~/Library/Application Support/Mekong/Scenes` (console ▸ Your scenes folder). They load live; `README.txt` there explains the format.
+
+## Licence
+
+MIT © 2026 Andrew Long. See [LICENSE](LICENSE).
