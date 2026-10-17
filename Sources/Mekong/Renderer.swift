@@ -130,7 +130,7 @@ final class VisualView: MTKView, MTKViewDelegate {
     func draw(in view: MTKView) {
         if ProcessInfo.processInfo.environment["MEKONG_DEBUG"] != nil, CACurrentMediaTime() - dbgLast > 1 {
             dbgLast = CACurrentMediaTime()
-            FileHandle.standardError.write("draw fps=\(preferredFramesPerSecond) bounds=\(bounds.size) drawable=\(drawableSize) pass=\(currentRenderPassDescriptor != nil) paused=\(isPaused) win=\(window != nil) level=\(engine.u.level) onset=\(engine.u.onset) master=\(engine.u.master) scene=\(engine.u.sceneA) seed=\(engine.u.seed)\n".data(using: .utf8)!)
+            FileHandle.standardError.write("draw fps=\(preferredFramesPerSecond) bounds=\(bounds.size) drawable=\(drawableSize) pass=\(currentRenderPassDescriptor != nil) paused=\(isPaused) win=\(window != nil) level=\(engine.u.level) onset=\(engine.u.onset) master=\(engine.u.master) scene=\(engine.u.sceneA) seed=\(engine.u.seed) inDb=\(engine.inputDb) presence=\(engine.u.presence)\n".data(using: .utf8)!)
         }
         MainActor.assumeIsolated { engine.step(now: CACurrentMediaTime()) }
         guard let pass = currentRenderPassDescriptor, let drawable = currentDrawable,

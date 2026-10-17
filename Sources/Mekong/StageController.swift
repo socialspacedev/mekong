@@ -3,6 +3,11 @@ import Combine
 
 /// The fullscreen projection: a borderless window covering one display
 /// (menu bar included), with the pointer hidden over it.
+///
+/// It sits at the shielding level (the one macOS uses for captured
+/// displays), above the menu bar, its status items such as the battery,
+/// notifications and other HUDs. When it's on the screen that owns the menu
+/// bar and Dock, those are hidden outright as well.
 @MainActor
 final class StageController: ObservableObject {
     struct Display: Identifiable, Hashable {
@@ -45,13 +50,16 @@ final class StageController: ObservableObject {
                                  backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false
         window.backgroundColor = .black
-        window.level = .screenSaver
+        window.level = NSWindow.Level(rawValue: Int(CGShieldingWindowLevel()))
         window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
         window.hidesOnDeactivate = false
         let view = VisualView(engine: engine, fps: 60, hidesCursor: true)
         window.contentView = view
         window.setFrame(screen.frame, display: true)
         window.orderFrontRegardless()
+        if screen == NSScreen.screens.first {
+            NSApp.presentationOptions = [.hideMenuBar, .hideDock]
+        }
 
         self.window = window
         self.view = view
@@ -60,6 +68,7 @@ final class StageController: ObservableObject {
     }
 
     func stop() {
+        if window != nil { NSApp.presentationOptions = [] }
         view?.setCursorHidden(false)
         window?.orderOut(nil)
         window = nil
@@ -88,4 +97,6 @@ final class StageController: ObservableObject {
 
 private final class StageWindow: NSWindow {
     override var canBecomeKey: Bool { true }
+    // Never let AppKit nudge the window clear of the menu bar.
+    override func constrainFrameRect(_ frameRect: NSRect, to screen: NSScreen?) -> NSRect { frameRect }
 }

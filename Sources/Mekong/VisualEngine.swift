@@ -1,13 +1,14 @@
 import Foundation
 import QuartzCore
 
-/// Must match `struct U` in Shaders.swift field for field — 20 Floats.
+/// Must match `struct U` in Shaders.swift field for field — 24 Floats.
 struct Uniforms {
     var time: Float = 0, width: Float = 0, height: Float = 0, level: Float = 0
     var onset: Float = 0, centroid: Float = 0, low: Float = 0, mid: Float = 0
     var high: Float = 0, seed: Float = 0, flash: Float = 0, density: Float = 0
     var intensity: Float = 1, master: Float = 1, sceneA: Float = 0, sceneB: Float = 0
     var mixAB: Float = 0, palette: Float = 0, tick: Float = 0, scroll: Float = 0
+    var presence: Float = 0, pad1: Float = 0, pad2: Float = 0, pad3: Float = 0
 }
 
 /// Sits between the analyser and the shader: smooths the raw features at the
@@ -24,6 +25,8 @@ final class VisualEngine {
     private(set) var bands = [Float](repeating: 0, count: AudioAnalyzer.bandCount)
     private(set) var drone: Float = 0
     private(set) var lastOnsetTime: CFTimeInterval = 0
+    private(set) var inputDb: Float = -120
+    private(set) var gateOpen = false
 
     var blackout = false
 
@@ -32,6 +35,7 @@ final class VisualEngine {
     private var lastUpdate: CFTimeInterval = 0
     private var lastOnsetCount = 0
     private var lastFlash: CFTimeInterval = -10
+    private var lastSound: CFTimeInterval = -10
     private var lastSceneChange: CFTimeInterval = 0
     private var currentScene = -1
     private var targetScene = 0
@@ -50,13 +54,24 @@ final class VisualEngine {
         let p = settings.prefs
 
         analyzer.setParams(.init(channel: p.channel, autoLevel: p.autoLevel,
-                                 gainDb: Float(p.gainDb), sensitivity: Float(p.attackSensitivity)))
+                                 gainDb: Float(p.gainDb), sensitivity: Float(p.attackSensitivity),
+                                 gateDb: Float(p.gateDb)))
         let f = analyzer.read(into: &raw)
+        inputDb = f.inputDb
+        gateOpen = f.gateOpen
 
         func follow(_ cur: inout Float, _ target: Float, _ attack: Float, _ release: Float) {
             let tau = target > cur ? attack : release
             cur += (target - cur) * (1 - expf(-dt / tau))
         }
+        // Presence: the picture opens out of a pinpoint when sound arrives and
+        // collapses back into one, like an old CRT switching off, after a
+        // couple of seconds of silence. The hold stops it collapsing in the
+        // gaps between notes. Linear ramps; the shader shapes the two phases.
+        if f.gateOpen { lastSound = now }
+        let sounding = now - lastSound < 2.0
+        u.presence = min(1, max(0, u.presence + (sounding ? dt / 0.9 : -dt / 1.3)))
+
         let r = Float(p.response)
         let atk = 0.015 + 0.12 * r, rel = 0.08 + 1.0 * r
         follow(&u.level, f.level, atk, rel)

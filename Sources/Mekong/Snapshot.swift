@@ -41,5 +41,23 @@ enum Snapshot {
                 print(String(format: "%@  level %.2f  onset %.2f  seed %.0f", path, u.level, u.onset, u.seed))
             }
         }
+
+        // The CRT collapse, part way: line phase and dot phase.
+        for (label, presence) in [("crt-line", Float(0.55)), ("crt-dot", Float(0.12))] {
+            var u = engine.u
+            u.width = 1280; u.height = 720
+            u.sceneA = 1; u.mixAB = 0; u.presence = presence
+            write(u, bands: engine.bands, to: (dir as NSString).appendingPathComponent("mekong-\(label).png"))
+        }
+    }
+
+    private static func write(_ u: Uniforms, bands: [Float], to path: String) {
+        if let img = MetalStage.shared.image(uniforms: u, bands: bands),
+           let dest = CGImageDestinationCreateWithURL(URL(fileURLWithPath: path) as CFURL,
+                                                      UTType.png.identifier as CFString, 1, nil) {
+            CGImageDestinationAddImage(dest, img, nil)
+            CGImageDestinationFinalize(dest)
+            print(path)
+        }
     }
 }

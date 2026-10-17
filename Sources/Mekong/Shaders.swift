@@ -1,10 +1,14 @@
 /// The whole visual is one fullscreen fragment shader, compiled from source at
 /// launch (a Swift Package can't build .metal files without full Xcode).
 ///
-/// Every scene returns a single 0…1 value per pixel — pure luminance, crisp
-/// edges, hashed data — and the audio only drives density, timing and
-/// re-scrambling. Sizes scale with `height / 1080`, so the small preview and
-/// a 1080p projector look the same.
+/// The monochrome scenes return a single 0…1 value per pixel — pure
+/// luminance, crisp edges, hashed data — tinted by the palette afterwards.
+/// The colour scenes (Scratch, Ribbons) return RGB and are softer. The audio
+/// only drives density, timing, colour and change. Sizes scale with
+/// `height / 1080`, so the small preview and a 1080p projector look the same.
+///
+/// Over everything sits the CRT presence: in silence the picture collapses to
+/// a horizontal line, then a dot, then black, and opens the same way back.
 enum Shaders {
     static let source = """
     #include <metal_stdlib>
@@ -16,6 +20,7 @@ enum Shaders {
         float high, seed, flash, density;
         float intensity, master, sceneA, sceneB;
         float mixAB, palette, tick, scroll;
+        float presence, pad1, pad2, pad3;
     };
 
     struct VOut { float4 pos [[position]]; };
@@ -43,6 +48,23 @@ enum Shaders {
     inline float band(constant float* b, float i) {
         return b[int(fmod(fmod(i, 32.0) + 32.0, 32.0))];
     }
+
+    inline float vnoise(float2 p) {
+        float2 i = floor(p), f = fract(p);
+        float2 w = f * f * (3.0 - 2.0 * f);
+        return mix(mix(h21(i), h21(i + float2(1, 0)), w.x),
+                   mix(h21(i + float2(0, 1)), h21(i + float2(1, 1)), w.x), w.y);
+    }
+
+    // Painted grounds and scratch inks for Scratch: muted film-dye colours.
+    constant float3 lyeGround[6] = {
+        float3(0.78, 0.55, 0.20), float3(0.70, 0.30, 0.22), float3(0.15, 0.45, 0.48),
+        float3(0.18, 0.20, 0.45), float3(0.45, 0.50, 0.22), float3(0.45, 0.20, 0.38)
+    };
+    constant float3 lyeInk[6] = {
+        float3(0.96, 0.92, 0.80), float3(0.92, 0.30, 0.18), float3(0.98, 0.85, 0.30),
+        float3(0.40, 0.80, 0.85), float3(0.95, 0.55, 0.65), float3(0.05, 0.05, 0.06)
+    };
 
     // 0 — Barcode: horizontal strata of hashed vertical lines.
     float barcode(float2 px, constant U& u, constant float* b) {
@@ -127,27 +149,144 @@ enum Shaders {
         return v * show * (0.55 + 0.45 * bv);
     }
 
-    float scene(int s, float2 px, constant U& u, constant float* b) {
-        switch (s) {
-            case 0: return barcode(px, u, b);
-            case 1: return grid(px, u, b);
-            case 2: return horizon(px, u, b);
-            default: return interference(px, u, b);
+    // 4 — Scratch: after Len Lye's direct-on-film work. Boiling painted
+    // ground, hand-scratched lines that tremble frame to frame, zigzags that
+    // dance with the mids, rings thrown out by attacks, grain and dust. The
+    // whole thing steps at 12 fps with gate weave, like projected film.
+    float3 scratch(float2 px, constant U& u, constant float* b) {
+        float k = u.height / 1080.0;
+        float2 res = float2(u.width, u.height);
+        float frame = floor(u.time * 12.0);
+        float2 weave = (float2(h11(frame * 1.3), h11(frame * 2.7)) - 0.5) * float2(3.0, 5.0) * k;
+        float2 q = px + weave;
+        float2 uv = q / res;
+        float era = u.seed;
+
+        int ia = int(h11(era * 0.37 + 0.1) * 6.0) % 6;
+        int ib = (ia + 1 + int(h11(era * 0.91 + 0.3) * 5.0)) % 6;
+        float paint = smoothstep(0.25, 0.75, vnoise(uv * float2(3.0, 2.0) + float2(0.0, frame * 0.37)));
+        float3 col = mix(lyeGround[ia], lyeGround[ib], paint) * (0.25 + 0.6 * u.level);
+
+        // Scratched verticals.
+        for (int i = 0; i < 8; i++) {
+            float fi = float(i);
+            if (fi >= 2.0 + u.level * 6.0) break;
+            float bv = band(b, fi * 4.0 + 2.0);
+            float base = 0.06 + 0.88 * h11(fi * 7.1 + floor(era / 2.0) * 0.3);
+            float wob = sin(uv.y * (6.0 + fi * 2.0) * 3.14159 + frame * 1.7 + fi) * (0.004 + 0.03 * bv)
+                      + (vnoise(float2(uv.y * 20.0, frame + fi * 10.0)) - 0.5) * 0.012;
+            float d = abs(uv.x - (base + wob)) * u.width;
+            float halfw = (1.0 + 3.5 * bv) * k;
+            float line = 1.0 - smoothstep(halfw, halfw + 1.5 * k, d);
+            line *= step(0.18, vnoise(float2(fi * 3.0, uv.y * 8.0 + frame * 0.5)));
+            float3 ink = lyeInk[int(h11(fi * 5.3 + era) * 6.0) % 6];
+            col = mix(col, ink, line * (0.6 + 0.4 * bv));
         }
+
+        // Zigzags, Lambeth Walk style.
+        for (int j = 0; j < 2; j++) {
+            float fj = float(j);
+            float tri = abs(fract(uv.x * (5.0 + fj * 3.0) + u.scroll * (2.0 - fj * 3.0)) - 0.5) * 2.0;
+            float y = 0.32 + 0.36 * fj + (tri - 0.5) * (0.02 + 0.12 * u.mid);
+            float d = abs(uv.y - y) * u.height;
+            float l = 1.0 - smoothstep(2.0 * k, 3.5 * k, d);
+            col = mix(col, lyeInk[(2 + j * 2) % 6], l * smoothstep(0.15, 0.45, u.level));
+        }
+
+        // A ring thrown out by each attack.
+        float2 rc = (float2(h11(era * 1.7), h11(era * 2.9)) * 0.8 + 0.1) * res;
+        float rr = (1.0 - u.onset) * 0.35 * u.height + 20.0 * k;
+        float rd = abs(length(q - rc) - rr);
+        float ring = (1.0 - smoothstep(3.0 * k, 5.5 * k, rd)) * u.onset;
+        col = mix(col, lyeInk[int(h11(era * 4.1) * 5.0) % 6], ring);
+
+        // Grain, dust, a soft projector falloff.
+        col += (h21(floor(q / (2.0 * k)) + frame * 13.0) - 0.5) * 0.06;
+        col = mix(col, float3(0.95, 0.92, 0.85), step(0.9993, h21(floor(q / (3.0 * k)) + frame * 7.0)));
+        float2 vc = uv - 0.5;
+        col *= 1.0 - dot(vc, vc) * 0.7;
+        return clamp(col, 0.0, 1.0);
+    }
+
+    // 5 — Ribbons: vertical streaks of coloured light flying outward from
+    // the centre in perspective, brightened by their band, surging on attacks.
+    float3 ribbons(float2 px, constant U& u, constant float* b) {
+        float k = u.height / 1080.0;
+        float cx = u.width * 0.5;
+        float3 col = float3(0.0);
+        for (int i = 0; i < 52; i++) {
+            float fi = float(i);
+            float z = fract(h11(fi * 3.7 + 1.3) + u.scroll * 0.6);
+            float side = h11(fi * 9.1) > 0.5 ? 1.0 : -1.0;
+            float persp = z * z * z;
+            float x = cx + side * (0.01 + persp) * u.width * 0.6 * (0.4 + 0.6 * h11(fi * 5.5));
+            float w = (0.6 + 22.0 * persp) * k * (0.5 + h11(fi * 2.2));
+            float d = (px.x - x) / w;
+            float d2 = d * d;
+            if (d2 > 30.0) continue;
+            float bv = band(b, fi);
+            float fade = smoothstep(0.0, 0.15, z) * (1.0 - smoothstep(0.85, 1.0, z));
+            float surge = u.onset * step(0.55, h11(fi + u.seed));
+            float amp = fade * (0.3 + 1.3 * bv + 0.9 * surge);
+            float hcol = h11(fi * 1.9 + 0.4);
+            float3 hue = 0.5 + 0.5 * cos(6.28318 * (hcol * 0.75 + float3(0.0, 0.33, 0.67) + 0.85));
+            col += hue * exp(-d2) * amp * 0.55 + exp(-d2 * 10.0) * amp * 0.2;
+        }
+        col *= 0.85 + 0.15 * sin(px.y / u.height * 3.14159);
+        return 1.0 - exp(-col * 1.4);
+    }
+
+    float3 shade(int s, float2 px, constant U& u, constant float* b) {
+        if (s == 4) return scratch(px, u, b) * u.intensity;
+        if (s == 5) return ribbons(px, u, b) * u.intensity;
+        float v;
+        switch (s) {
+            case 0: v = barcode(px, u, b); break;
+            case 1: v = grid(px, u, b); break;
+            case 2: v = horizon(px, u, b); break;
+            default: v = interference(px, u, b); break;
+        }
+        v = clamp(v * u.intensity, 0.0, 1.0);
+        if (u.palette > 1.5) return float3(1.0 - v);
+        if (u.palette > 0.5) return v * float3(0.55, 0.86, 0.96);
+        return float3(v);
     }
 
     fragment float4 fmain(VOut in [[stage_in]],
                           constant U& u [[buffer(0)]],
                           constant float* b [[buffer(1)]]) {
+        float2 res = float2(u.width, u.height);
         float2 px = floor(in.pos.xy);
-        float v = scene(int(u.sceneA), px, u, b);
-        if (u.mixAB > 0.0) v = mix(v, scene(int(u.sceneB), px, u, b), u.mixAB);
-        v = clamp(v * u.intensity, 0.0, 1.0);
-        v = mix(v, 1.0 - v, u.flash);
-        float3 c = float3(v);
-        if (u.palette > 1.5) c = float3(1.0 - v);
-        else if (u.palette > 0.5) c = v * float3(0.55, 0.86, 0.96);
-        return float4(c * u.master, 1.0);
+        float k = u.height / 1080.0;
+        float p = u.presence;
+        if (p <= 0.0005) return float4(0.0, 0.0, 0.0, 1.0);
+
+        // CRT presence: a dot grows into a line (first 40 %), the line opens
+        // into the picture (the rest). Collapse runs the same path backwards.
+        float2 c = floor(res * 0.5);
+        float2 d = px - c;
+        float sx = smoothstep(0.0, 0.4, p);
+        float sy = smoothstep(0.4, 1.0, p);
+        float halfW = max(sx * res.x * 0.5, 1.5 * k);
+        float halfH = max(sy * res.y * 0.5, 1.5 * k);
+
+        float3 col = float3(0.0);
+        if (abs(d.x) <= halfW && abs(d.y) <= halfH) {
+            float2 spx = p >= 1.0 ? px
+                       : clamp(floor(c + d / float2(max(sx, 0.001), max(sy, 0.001))), float2(0.0), res - 1.0);
+            col = shade(int(u.sceneA), spx, u, b);
+            if (u.mixAB > 0.0) col = mix(col, shade(int(u.sceneB), spx, u, b), u.mixAB);
+            col = mix(col, float3(1.0), (1.0 - sy) * 0.85);   // the collapsed beam burns white
+        }
+        if (p < 1.0) {
+            float fadeIn = smoothstep(0.0, 0.12, p);
+            float lineGlow = exp(-abs(d.y) / (5.0 * k)) * step(abs(d.x), halfW) * (1.0 - sy);
+            float dotGlow = exp(-length(d) / (9.0 * k)) * (1.0 - sx);
+            col += (lineGlow * 0.35 + dotGlow * 0.7) * fadeIn;
+        }
+
+        col = mix(col, 1.0 - col, u.flash);
+        return float4(clamp(col, 0.0, 1.0) * u.master, 1.0);
     }
     """
 }

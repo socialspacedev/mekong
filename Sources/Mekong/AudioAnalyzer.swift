@@ -17,11 +17,14 @@ final class AudioAnalyzer: @unchecked Sendable {
         var autoLevel = true
         var gainDb: Float = 0
         var sensitivity: Float = 0.5
+        var gateDb: Float = -55     // below this the input counts as silence
     }
 
     /// What the main thread reads each frame.
     struct Snapshot {
         var level: Float = 0
+        var inputDb: Float = -120   // raw input loudness, for the console meter
+        var gateOpen = false
         var centroid: Float = 0
         var onsetCount = 0
         var onsetStrength: Float = 0
@@ -187,13 +190,16 @@ final class AudioAnalyzer: @unchecked Sendable {
         if p.autoLevel {
             // Follow the loudest recent playing, letting go at 3 dB/s, but
             // never chase below -50 dB or silence gets amplified into noise.
-            peakDb = max(rmsDb, peakDb - 3 * hopSeconds, -50)
+            // Never chase far below the gate, or room noise gets amplified
+            // into activity.
+            peakDb = max(rmsDb, peakDb - 3 * hopSeconds, p.gateDb + 24)
             reference = peakDb + 3
         } else {
             reference = -6 - p.gainDb
         }
         let range: Float = 30
-        let level = min(1, max(0, (rmsDb - (reference - range)) / range))
+        let gateOpen = rmsDb > p.gateDb
+        let level = gateOpen ? min(1, max(0, (rmsDb - (reference - range)) / range)) : 0
 
         // FFT → power spectrum.
         frame.withUnsafeMutableBufferPointer { f in
@@ -275,6 +281,8 @@ final class AudioAnalyzer: @unchecked Sendable {
         let current = prevBands
         latest.withLock { state in
             state.0.level = level
+            state.0.inputDb = rmsDb
+            state.0.gateOpen = gateOpen
             state.0.centroid = centroid
             if attack >= 0 {
                 state.0.onsetCount = count

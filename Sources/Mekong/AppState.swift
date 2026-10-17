@@ -69,7 +69,7 @@ final class AppState: ObservableObject {
                     break
                 }
                 switch event.charactersIgnoringModifiers?.lowercased() {
-                case "1", "2", "3", "4":
+                case "1", "2", "3", "4", "5", "6":
                     self.selectScene(Int(event.charactersIgnoringModifiers!)! - 1)
                     return nil
                 case "p":

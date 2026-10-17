@@ -72,7 +72,7 @@ struct ConsoleView: View {
             hint("P", "present")
             hint("Esc", "stop")
             hint("Space", "blackout")
-            hint("1–4", "scene")
+            hint("1–6", "scene")
         }
     }
 
@@ -237,6 +237,8 @@ struct ConsoleView: View {
                 }
             }
 
+            InputMeter(engine: app.engine, gateDb: $settings.prefs.gateDb)
+
             Toggle("Auto level", isOn: $settings.prefs.autoLevel)
                 .toggleStyle(.switch).controlSize(.small)
                 .font(.system(size: 12))
@@ -290,6 +292,54 @@ struct PreviewSurface: NSViewRepresentable {
         VisualView(engine: engine, fps: 30, hidesCursor: false)
     }
     func updateNSView(_ nsView: VisualView, context: Context) {}
+}
+
+/// Raw input level against the silence threshold. Drag the marker to just
+/// above the room/interface noise: below it the picture collapses to a dot.
+struct InputMeter: View {
+    let engine: VisualEngine
+    @Binding var gateDb: Double
+
+    private static let floor: Double = -80, ceiling: Double = 0
+    private func x(_ db: Double, _ w: CGFloat) -> CGFloat {
+        CGFloat((min(max(db, Self.floor), Self.ceiling) - Self.floor) / (Self.ceiling - Self.floor)) * w
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Text("Silence threshold").font(.system(size: 12)).foregroundStyle(Theme.textSecondary)
+                Spacer()
+                Text("\(Int(gateDb.rounded())) dB").font(Theme.mono(10)).foregroundStyle(Theme.textTertiary)
+            }
+            TimelineView(.animation(minimumInterval: 1 / 30)) { _ in
+                let db = Double(engine.inputDb)
+                let open = engine.gateOpen
+                GeometryReader { geo in
+                    let w = geo.size.width
+                    ZStack(alignment: .leading) {
+                        Rectangle().fill(Theme.surfaceHi).frame(height: 4)
+                        Rectangle().fill(open ? Theme.accent : Theme.textTertiary)
+                            .frame(width: x(db, w), height: 4)
+                        Rectangle().fill(Theme.textPrimary)
+                            .frame(width: 2, height: 14)
+                            .offset(x: x(gateDb, w) - 1)
+                    }
+                    .frame(height: 14)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 0).onChanged { g in
+                        let v = Self.floor + Double(max(0, min(1, g.location.x / w))) * (Self.ceiling - Self.floor)
+                        gateDb = min(-20, v.rounded())
+                    })
+                }
+                .frame(height: 14)
+            }
+            Text("Input level, live. Drag the marker just above the hiss you get with nothing played — below it, the picture shrinks to a dot.")
+                .font(.system(size: 11))
+                .foregroundStyle(Theme.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
 }
 
 /// What Mekong is hearing, in the console only (never on the wall).

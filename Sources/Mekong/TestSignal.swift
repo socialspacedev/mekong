@@ -1,7 +1,8 @@
 import Foundation
 
 /// A synthetic stand-in for the guitar: a slowly swelling low drone with
-/// pentatonic plucks over it at irregular intervals. Fed straight into the
+/// pentatonic plucks over it at irregular intervals, and a 6-second rest
+/// every 25 seconds so the visuals' fade to silence can be seen. Fed straight into the
 /// analyser (nothing is played out loud), so the visuals can be tuned
 /// without an instrument plugged in.
 final class TestSignal: @unchecked Sendable {
@@ -63,7 +64,9 @@ final class TestSignal: @unchecked Sendable {
                 }
                 plucks[k].age += dt
             }
-            buffer[i] = Float(s * 0.3)
+            let cycle = t.truncatingRemainder(dividingBy: 25)
+            let rest = min(max((cycle - 18) / 0.4, 0), 1) * min(max((24 - cycle) / 0.4, 0), 1)
+            buffer[i] = Float(s * 0.3 * (1 - rest))
         }
         plucks.removeAll { $0.amp * exp(-$0.age / 1.1) < 0.001 }
     }

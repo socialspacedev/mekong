@@ -1,10 +1,10 @@
 import Foundation
 import Combine
 
-/// The four visual scenes. Each is abstract — nothing in them draws the
-/// waveform or a spectrum; the audio only decides density, timing and change.
+/// The visual scenes. All abstract — nothing draws the waveform or a
+/// spectrum; the audio only decides density, timing, colour and change.
 enum SceneKind: Int, CaseIterable, Identifiable {
-    case barcode, grid, horizon, interference
+    case barcode, grid, horizon, interference, scratch, ribbons
 
     var id: Int { rawValue }
 
@@ -14,6 +14,8 @@ enum SceneKind: Int, CaseIterable, Identifiable {
         case .grid:         "Grid"
         case .horizon:      "Horizon"
         case .interference: "Interference"
+        case .scratch:      "Scratch"
+        case .ribbons:      "Ribbons"
         }
     }
 
@@ -23,8 +25,13 @@ enum SceneKind: Int, CaseIterable, Identifiable {
         case .grid:         "Rows of cells drift like a data feed, each row tied to one region of the sound."
         case .horizon:      "One line holds the drone; playing harder splits it into many."
         case .interference: "Stripe fields at shifting frequencies; attacks break them into static."
+        case .scratch:      "Hand-scratched film after Len Lye: wobbling lines and painted colour that jitter at film speed."
+        case .ribbons:      "Vertical ribbons of coloured light streaming outward; attacks send a surge through."
         }
     }
+
+    /// Scenes drawn in colour ignore the White / Tint / Inverted palette.
+    var isColour: Bool { self == .scratch || self == .ribbons }
 }
 
 /// Everything you set on the console, saved between launches.
@@ -33,6 +40,7 @@ struct Prefs: Codable, Equatable {
     var deviceUID = ""            // "" = system default input
     var channel = -1              // -1 = mix all channels
     var autoLevel = true
+    var gateDb: Double = -55      // quieter than this counts as silence
     var gainDb: Double = 0        // used when auto level is off
     var attackSensitivity: Double = 0.5
 
@@ -66,9 +74,14 @@ final class AppSettings: ObservableObject {
     }
 
     private init() {
+        // Lay saved values over the defaults, so settings saved by an older
+        // version (missing newer keys) still load instead of resetting.
         if let data = UserDefaults.standard.data(forKey: Self.key),
-           let saved = try? JSONDecoder().decode(Prefs.self, from: data) {
-            prefs = saved
+           let saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let defaults = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(Prefs())) as? [String: Any],
+           let merged = try? JSONSerialization.data(withJSONObject: defaults.merging(saved) { _, new in new }),
+           let prefs = try? JSONDecoder().decode(Prefs.self, from: merged) {
+            self.prefs = prefs
         } else {
             prefs = Prefs()
         }

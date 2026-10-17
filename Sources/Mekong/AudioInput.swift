@@ -11,10 +11,15 @@ struct InputDevice: Identifiable, Hashable {
 }
 
 /// Owns the live input: lists devices, opens the chosen one and feeds every
-/// buffer straight into the analyser. Uses an `AVAudioSinkNode` rather than a
-/// tap because taps on macOS arrive in ~100 ms chunks — far too late for a
-/// pluck to land on the beat visually. The sink runs at the device's own I/O
-/// buffer size.
+/// buffer straight into the analyser.
+///
+/// Uses an input-only HAL unit rather than AVAudioEngine. AVAudioEngine ties
+/// its input to the system *output* device: switching the Mac's output
+/// reconfigured the engine and crashed the reconnect, and an interface used
+/// only as an input (e.g. an M-Audio AIR alongside the built-in speakers)
+/// could deliver silence. A HAL unit with output disabled has no output side
+/// to disturb, and it delivers at the device's own buffer size, so attacks
+/// land on time.
 @MainActor
 final class AudioInput: ObservableObject {
     static let testSignalUID = "mekong.test-signal"
@@ -26,13 +31,15 @@ final class AudioInput: ObservableObject {
 
     let analyzer = AudioAnalyzer()
 
-    private var engine: AVAudioEngine?
+    private var hal: HALInput?
     private var test: TestSignal?
     private var currentUID = ""
-    private var configObserver: NSObjectProtocol?
+    private var openedDevice: AudioDeviceID = 0
+    private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
 
     init() {
         refreshDevices()
+        watchHardware()
     }
 
     func refreshDevices() {
@@ -50,20 +57,20 @@ final class AudioInput: ObservableObject {
             t.start()
             test = t
             channelCount = 1
-            status = "Test signal — a synthetic drone with plucks"
+            status = "Test signal — a synthetic drone with plucks and rests"
             isRunning = true
             return
         }
 
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
         case .authorized:
-            openEngine(uid: uid)
+            open(uid: uid)
         case .notDetermined:
             status = "Waiting for microphone permission…"
             AVCaptureDevice.requestAccess(for: .audio) { granted in
                 Task { @MainActor in
                     guard self.currentUID == uid else { return }
-                    if granted { self.openEngine(uid: uid) } else { self.denied() }
+                    if granted { self.open(uid: uid) } else { self.denied() }
                 }
             }
         default:
@@ -72,12 +79,11 @@ final class AudioInput: ObservableObject {
     }
 
     func stop() {
-        if let o = configObserver { NotificationCenter.default.removeObserver(o) }
-        configObserver = nil
-        engine?.stop()
-        engine = nil
+        hal?.stop()
+        hal = nil
         test?.stop()
         test = nil
+        openedDevice = 0
         isRunning = false
     }
 
@@ -86,66 +92,70 @@ final class AudioInput: ObservableObject {
         isRunning = false
     }
 
-    private func openEngine(uid: String) {
-        let engine = AVAudioEngine()
-        let input = engine.inputNode
-
-        let device = devices.first(where: { $0.uid == uid }) ?? Self.defaultDevice(in: devices)
-        if !uid.isEmpty, let device, let au = input.audioUnit {
-            var id = device.id
-            AudioUnitSetProperty(au, kAudioOutputUnitProperty_CurrentDevice,
-                                 kAudioUnitScope_Global, 0, &id,
-                                 UInt32(MemoryLayout<AudioDeviceID>.size))
-        }
-
-        let format = input.outputFormat(forBus: 0)
-        guard format.channelCount > 0, format.sampleRate > 0 else {
-            status = "No audio input available"
+    private func open(uid: String) {
+        let device = uid.isEmpty ? Self.defaultInput(in: devices)
+                                 : devices.first(where: { $0.uid == uid })
+        guard let device else {
+            status = uid.isEmpty ? "No audio input available"
+                                 : "Selected input isn't connected — plug it in or pick another"
             return
         }
-        analyzer.configure(sampleRate: format.sampleRate)
-
-        let analyzer = self.analyzer
-        let sink = AVAudioSinkNode { _, frames, abl in
-            analyzer.ingest(abl, frames: Int(frames))
-            return noErr
-        }
-        engine.attach(sink)
-        engine.connect(input, to: sink, format: format)
-
         do {
-            try engine.start()
+            let hal = try HALInput(device: device.id, analyzer: analyzer)
+            self.hal = hal
+            openedDevice = device.id
+            channelCount = hal.channels
+            status = "\(device.name) · \(Int(hal.sampleRate / 1000)) kHz · \(hal.channels) ch"
+            isRunning = true
         } catch {
-            status = "Couldn't open input: \(error.localizedDescription)"
-            return
+            status = "Couldn't open \(device.name) (\(error.localizedDescription))"
         }
+    }
 
-        self.engine = engine
-        channelCount = Int(format.channelCount)
-        status = "\(device?.name ?? "Input") · \(Int(format.sampleRate / 1000)) kHz · \(channelCount) ch"
-        isRunning = true
+    // MARK: - Hardware changes
 
-        // Interface unplugged, sample rate changed, etc. — reopen.
-        configObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange, object: engine, queue: .main
-        ) { [weak self] _ in
-            MainActor.assumeIsolated {
-                guard let self else { return }
-                self.start(uid: self.currentUID)
-            }
+    /// Reopen when the device list changes (interface plugged/unplugged), when
+    /// the system default input changes while we're following it, or when the
+    /// open device changes sample rate. Output changes are irrelevant now.
+    private func watchHardware() {
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        listen(system, kAudioHardwarePropertyDevices) { [weak self] in
+            guard let self else { return }
+            let before = Set(self.devices.map(\.uid))
+            self.refreshDevices()
+            let after = Set(self.devices.map(\.uid))
+            guard before != after, self.currentUID != Self.testSignalUID else { return }
+            let stillThere = self.devices.contains(where: { $0.id == self.openedDevice })
+            if !stillThere || !self.isRunning { self.start(uid: self.currentUID) }
         }
+        listen(system, kAudioHardwarePropertyDefaultInputDevice) { [weak self] in
+            guard let self, self.currentUID.isEmpty else { return }
+            self.start(uid: "")
+        }
+    }
+
+    private func listen(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                        _ action: @escaping @MainActor () -> Void) {
+        var addr = AudioObjectPropertyAddress(mSelector: selector,
+                                              mScope: kAudioObjectPropertyScopeGlobal,
+                                              mElement: kAudioObjectPropertyElementMain)
+        let block: AudioObjectPropertyListenerBlock = { _, _ in
+            DispatchQueue.main.async { MainActor.assumeIsolated { action() } }
+        }
+        AudioObjectAddPropertyListenerBlock(object, &addr, nil, block)
+        listeners.append((object, addr, block))
     }
 
     // MARK: - CoreAudio device list
 
-    private static func defaultDevice(in devices: [InputDevice]) -> InputDevice? {
+    private static func defaultInput(in devices: [InputDevice]) -> InputDevice? {
         var addr = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultInputDevice,
                                               mScope: kAudioObjectPropertyScopeGlobal,
                                               mElement: kAudioObjectPropertyElementMain)
         var id = AudioDeviceID(0)
         var size = UInt32(MemoryLayout<AudioDeviceID>.size)
         AudioObjectGetPropertyData(AudioObjectID(kAudioObjectSystemObject), &addr, 0, nil, &size, &id)
-        return devices.first(where: { $0.id == id })
+        return devices.first(where: { $0.id == id }) ?? devices.first
     }
 
     static func inputDevices() -> [InputDevice] {
@@ -192,4 +202,105 @@ final class AudioInput: ObservableObject {
               let v = value else { return "" }
         return v.takeRetainedValue() as String
     }
+}
+
+/// One open input device: an AUHAL unit with input enabled and output
+/// disabled, pulling float32 non-interleaved audio in its input callback.
+private final class HALInput: @unchecked Sendable {
+    struct Failure: LocalizedError {
+        let step: String
+        let status: OSStatus
+        var errorDescription: String? { "\(step) failed, OSStatus \(status)" }
+    }
+
+    let unit: AudioUnit
+    let analyzer: AudioAnalyzer
+    let channels: Int
+    let sampleRate: Double
+    let capacity: Int
+    let buffers: UnsafeMutableAudioBufferListPointer
+
+    init(device: AudioDeviceID, analyzer: AudioAnalyzer) throws {
+        func check(_ s: OSStatus, _ step: String) throws {
+            if s != noErr { throw Failure(step: step, status: s) }
+        }
+
+        var desc = AudioComponentDescription(componentType: kAudioUnitType_Output,
+                                             componentSubType: kAudioUnitSubType_HALOutput,
+                                             componentManufacturer: kAudioUnitManufacturer_Apple,
+                                             componentFlags: 0, componentFlagsMask: 0)
+        guard let comp = AudioComponentFindNext(nil, &desc) else { throw Failure(step: "Find HAL", status: -1) }
+        var maybeUnit: AudioUnit?
+        try check(AudioComponentInstanceNew(comp, &maybeUnit), "Create HAL")
+        guard let unit = maybeUnit else { throw Failure(step: "Create HAL", status: -1) }
+        self.unit = unit
+        self.analyzer = analyzer
+
+        let u32 = UInt32(MemoryLayout<UInt32>.size)
+        var one: UInt32 = 1, zero: UInt32 = 0
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &one, u32), "Enable input")
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &zero, u32), "Disable output")
+        var dev = device
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                       &dev, UInt32(MemoryLayout<AudioDeviceID>.size)), "Select device")
+
+        // The device's own format on the input side of element 1…
+        var hw = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &hw, &size), "Read format")
+        channels = max(1, Int(hw.mChannelsPerFrame))
+        sampleRate = hw.mSampleRate > 0 ? hw.mSampleRate : 48000
+
+        // …and what we want handed to us: float32, one buffer per channel.
+        var client = AudioStreamBasicDescription(
+            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
+            mChannelsPerFrame: UInt32(channels), mBitsPerChannel: 32, mReserved: 0)
+        try check(AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1,
+                                       &client, size), "Set format")
+
+        var maxFrames: UInt32 = 0
+        size = u32
+        AudioUnitGetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, &size)
+        capacity = max(Int(maxFrames), 4096)
+        buffers = AudioBufferList.allocate(maximumBuffers: channels)
+        for i in 0..<channels {
+            buffers[i] = AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(capacity * 4),
+                                     mData: UnsafeMutableRawPointer.allocate(byteCount: capacity * 4, alignment: 16))
+        }
+
+        analyzer.configure(sampleRate: sampleRate)
+
+        var callback = AURenderCallbackStruct(inputProc: halInputProc,
+                                              inputProcRefCon: Unmanaged.passUnretained(self).toOpaque())
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
+                                       &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size)), "Set callback")
+        try check(AudioUnitInitialize(unit), "Initialise")
+        try check(AudioOutputUnitStart(unit), "Start")
+    }
+
+    func stop() {
+        AudioOutputUnitStop(unit)
+        AudioUnitUninitialize(unit)
+    }
+
+    deinit {
+        AudioComponentInstanceDispose(unit)
+        for b in buffers { b.mData?.deallocate() }
+        free(buffers.unsafeMutablePointer)
+    }
+}
+
+private let halInputProc: AURenderCallback = { refCon, flags, timeStamp, bus, frames, _ in
+    let input = Unmanaged<HALInput>.fromOpaque(refCon).takeUnretainedValue()
+    guard Int(frames) <= input.capacity else { return noErr }
+    for i in 0..<input.buffers.count {
+        input.buffers[i].mDataByteSize = frames * 4
+    }
+    let status = AudioUnitRender(input.unit, flags, timeStamp, bus, frames, input.buffers.unsafeMutablePointer)
+    if status == noErr {
+        input.analyzer.ingest(input.buffers.unsafePointer, frames: Int(frames))
+    }
+    return status
 }
