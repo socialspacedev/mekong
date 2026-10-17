@@ -3,6 +3,7 @@
 Real-time, audio-reactive visuals for projecting behind improvised guitar over drones.
 Abstract, monochrome, data-driven (after Ryoji Ikeda): no waveforms, no EQ bars.
 
+    ./install.sh          # build and install to /Applications
     ./build.sh            # debug build + launch
     ./build.sh release    # optimised build → dist/Mekong.app
 
