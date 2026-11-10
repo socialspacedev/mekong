@@ -33,7 +33,7 @@ struct MekongApp: App {
             // Clickable mirrors of the single-key controls; the key monitor
             // owns the keys themselves.
             CommandMenu("Visuals") {
-                Button(app.stage.isPresenting ? "Stop Presenting (P / Esc)" : "Present (P)") {
+                Button(app.stage.isActive ? "Stop Presenting (P / Esc)" : "Present (P)") {
                     app.togglePresent()
                 }
                 Button(app.blackout ? "Lift Blackout (Space)" : "Blackout (Space)") {

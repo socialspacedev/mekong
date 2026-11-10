@@ -47,7 +47,7 @@ final class AppState: ObservableObject {
     }
 
     func togglePresent() {
-        stage.isPresenting ? stage.stop() : stage.present(on: settings.prefs.displayID)
+        stage.isActive ? stage.stop() : stage.present(on: settings.prefs.displayID)
     }
 
     /// By position in the scene list (number keys 1–9).
@@ -68,7 +68,7 @@ final class AppState: ObservableObject {
                 else { return event }
                 switch event.keyCode {
                 case 53:  // Esc
-                    if self.stage.isPresenting { self.stage.stop(); return nil }
+                    if self.stage.isActive { self.stage.stop(); return nil }
                     return event
                 case 49:  // Space
                     self.blackout.toggle()

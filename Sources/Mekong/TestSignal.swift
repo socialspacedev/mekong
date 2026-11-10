@@ -9,6 +9,7 @@ final class TestSignal: @unchecked Sendable {
     private let analyzer: AudioAnalyzer
     private let sampleRate = 48000.0
     private let chunk = 480                    // 10 ms
+    private let queue = DispatchQueue(label: "mekong.test-signal", qos: .userInteractive)
     private var timer: DispatchSourceTimer?
     private var buffer: [Float]
 
@@ -25,16 +26,19 @@ final class TestSignal: @unchecked Sendable {
     }
 
     func start() {
-        let timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "mekong.test-signal", qos: .userInteractive))
+        let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(10), leeway: .milliseconds(1))
         timer.setEventHandler { [weak self] in self?.tick() }
         timer.resume()
         self.timer = timer
     }
 
+    /// Returns once no tick is running, so the analyser can be reconfigured
+    /// straight after (cancel alone doesn't wait for one already in flight).
     func stop() {
         timer?.cancel()
         timer = nil
+        queue.sync {}
     }
 
     private func tick() {

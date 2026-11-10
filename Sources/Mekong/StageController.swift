@@ -19,6 +19,12 @@ final class StageController: ObservableObject {
     @Published private(set) var displays: [Display] = []
     @Published private(set) var isPresenting = false
     @Published private(set) var presentingOn: Display?
+    /// The display the stage was on when it dropped out mid-set (a knocked
+    /// cable, HDMI renegotiating). The stage goes back up when it returns.
+    @Published private(set) var waitingFor: Display?
+
+    /// Presenting, or waiting to present again.
+    var isActive: Bool { isPresenting || waitingFor != nil }
 
     private let engine: VisualEngine
     private var window: NSWindow?
@@ -34,7 +40,7 @@ final class StageController: ObservableObject {
         }
     }
 
-    /// 0 means "automatic": the first non-main display, else the main one.
+    /// 0 means "automatic": the first display without the menu bar, else the main one.
     func resolve(_ id: CGDirectDisplayID) -> Display? {
         displays.first(where: { $0.id == id })
             ?? displays.first(where: { !$0.isMain })
@@ -43,7 +49,7 @@ final class StageController: ObservableObject {
 
     func present(on id: CGDirectDisplayID) {
         guard let display = resolve(id),
-              let screen = NSScreen.screens.first(where: { Self.id(of: $0) == display.id }) else { return }
+              let screen = Self.screen(display.id) else { return }
         stop()
 
         let window = StageWindow(contentRect: screen.frame, styleMask: .borderless,
@@ -68,6 +74,11 @@ final class StageController: ObservableObject {
     }
 
     func stop() {
+        takeDown()
+        waitingFor = nil
+    }
+
+    private func takeDown() {
         if window != nil { NSApp.presentationOptions = [] }
         view?.setCursorHidden(false)
         window?.orderOut(nil)
@@ -78,16 +89,30 @@ final class StageController: ObservableObject {
     }
 
     private func refresh() {
-        let main = NSScreen.main.flatMap(Self.id(of:))
+        // The menu-bar screen. NSScreen.main is whichever has the key window,
+        // which is the projector whenever the console happens to sit there.
+        let main = NSScreen.screens.first.flatMap(Self.id(of:))
         displays = NSScreen.screens.compactMap { s in
             guard let id = Self.id(of: s) else { return nil }
             return Display(id: id, name: s.localizedName, isMain: id == main)
         }
-        // Projector unplugged mid-set: drop the stage rather than leave a
-        // window stranded on a screen that no longer exists.
-        if let on = presentingOn, !displays.contains(where: { $0.id == on.id }) {
-            stop()
+        if let on = presentingOn {
+            if let screen = Self.screen(on.id) {
+                // Resolution or arrangement changed: keep covering all of it.
+                if let window, window.frame != screen.frame { window.setFrame(screen.frame, display: true) }
+            } else {
+                // Projector gone: take the stage down rather than strand a
+                // window on a screen that no longer exists, and wait for it.
+                takeDown()
+                waitingFor = on
+            }
+        } else if let waiting = waitingFor, Self.screen(waiting.id) != nil {
+            present(on: waiting.id)
         }
+    }
+
+    private static func screen(_ id: CGDirectDisplayID) -> NSScreen? {
+        NSScreen.screens.first(where: { Self.id(of: $0) == id })
     }
 
     private static func id(of screen: NSScreen) -> CGDirectDisplayID? {

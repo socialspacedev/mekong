@@ -15,6 +15,14 @@ let package = Package(
                 // friction with CoreAudio / Metal callbacks.
                 .swiftLanguageMode(.v5)
             ]
-        )
+        ),
+        .testTarget(
+            name: "MekongTests",
+            dependencies: ["Mekong"],
+            path: "Tests/MekongTests",
+            swiftSettings: [
+                .swiftLanguageMode(.v5)
+            ]
+        ),
     ]
 )

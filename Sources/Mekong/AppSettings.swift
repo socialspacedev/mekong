@@ -74,22 +74,22 @@ final class AppSettings: ObservableObject {
     }
 
     private init() {
-        // Lay saved values over the defaults, so settings saved by an older
-        // version (missing newer keys) still load instead of resetting.
-        if let data = UserDefaults.standard.data(forKey: Self.key),
-           var saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           Self.migrate(&saved),
-           let defaults = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(Prefs())) as? [String: Any],
-           let merged = try? JSONSerialization.data(withJSONObject: defaults.merging(saved) { _, new in new }),
-           let prefs = try? JSONDecoder().decode(Prefs.self, from: merged) {
-            self.prefs = prefs
-        } else {
-            prefs = Prefs()
-        }
+        prefs = UserDefaults.standard.data(forKey: Self.key).flatMap(Self.decode) ?? Prefs()
+    }
+
+    /// Lays saved values over the defaults, so settings saved by an older
+    /// version (missing newer keys) still load instead of resetting.
+    nonisolated static func decode(_ data: Data) -> Prefs? {
+        guard var saved = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              migrate(&saved),
+              let defaults = try? JSONSerialization.jsonObject(with: JSONEncoder().encode(Prefs())) as? [String: Any],
+              let merged = try? JSONSerialization.data(withJSONObject: defaults.merging(saved) { _, new in new })
+        else { return nil }
+        return try? JSONDecoder().decode(Prefs.self, from: merged)
     }
 
     /// Scenes used to be saved by number; they're saved by key now.
-    private static func migrate(_ saved: inout [String: Any]) -> Bool {
+    private nonisolated static func migrate(_ saved: inout [String: Any]) -> Bool {
         if saved["sceneKey"] == nil, let n = saved["scene"] as? Int, let kind = SceneKind(rawValue: n) {
             saved["sceneKey"] = kind.key
         }

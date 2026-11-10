@@ -66,6 +66,10 @@ struct ConsoleView: View {
                         .font(Theme.label()).tracking(1.6)
                 }
                 .foregroundStyle(Theme.accent)
+            } else if let waiting = stage.waitingFor {
+                Text("WAITING FOR \(waiting.name.uppercased())")
+                    .font(Theme.label()).tracking(1.6)
+                    .foregroundStyle(Theme.textSecondary)
             }
         }
     }
@@ -98,14 +102,14 @@ struct ConsoleView: View {
             Picker("Display", selection: $settings.prefs.displayID) {
                 Text("Automatic").tag(UInt32(0))
                 ForEach(stage.displays) { d in
-                    Text(d.isMain ? "\(d.name) (this screen)" : d.name).tag(d.id)
+                    Text(d.isMain ? "\(d.name) (main screen)" : d.name).tag(d.id)
                 }
             }
             .labelsHidden()
 
             HStack(spacing: 8) {
                 Button(action: app.togglePresent) {
-                    Text(stage.isPresenting ? "Stop presenting" : "Present")
+                    Text(stage.isActive ? "Stop presenting" : "Present")
                         .font(.system(size: 13, weight: .semibold))
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 9)
@@ -126,6 +130,8 @@ struct ConsoleView: View {
             }
             if stage.isPresenting {
                 caption("The screensaver and display sleep are held off while presenting.")
+            } else if stage.waitingFor != nil {
+                caption("The display dropped out. The visuals go back up by themselves when it returns.")
             }
         }
     }

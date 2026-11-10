@@ -36,6 +36,8 @@ final class AudioInput: ObservableObject {
     private var currentUID = ""
     private var openedDevice: AudioDeviceID = 0
     private var listeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
+    /// On the open device only; replaced each time a device is opened.
+    private var deviceListeners: [(AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock)] = []
 
     init() {
         refreshDevices()
@@ -79,6 +81,11 @@ final class AudioInput: ObservableObject {
     }
 
     func stop() {
+        for (object, addr, block) in deviceListeners {
+            var addr = addr
+            AudioObjectRemovePropertyListenerBlock(object, &addr, nil, block)
+        }
+        deviceListeners = []
         hal?.stop()
         hal = nil
         test?.stop()
@@ -107,6 +114,7 @@ final class AudioInput: ObservableObject {
             channelCount = hal.channels
             status = "\(device.name) · \(Int(hal.sampleRate / 1000)) kHz · \(hal.channels) ch"
             isRunning = true
+            watchDevice(device.id)
         } catch {
             status = "Couldn't open \(device.name) (\(error.localizedDescription))"
         }
@@ -114,9 +122,9 @@ final class AudioInput: ObservableObject {
 
     // MARK: - Hardware changes
 
-    /// Reopen when the device list changes (interface plugged/unplugged), when
-    /// the system default input changes while we're following it, or when the
-    /// open device changes sample rate. Output changes are irrelevant now.
+    /// Reopen when the device list changes (interface plugged/unplugged), or
+    /// when the system default input changes while we're following it.
+    /// Output changes are irrelevant now.
     private func watchHardware() {
         let system = AudioObjectID(kAudioObjectSystemObject)
         listen(system, kAudioHardwarePropertyDevices) { [weak self] in
@@ -134,8 +142,26 @@ final class AudioInput: ObservableObject {
         }
     }
 
+    /// Reopen when the open device changes sample rate (a DAW or Audio MIDI
+    /// Setup can do this mid-set; the input unit can't convert, so every render
+    /// would fail and the visuals go dark) or stops being usable.
+    private func watchDevice(_ id: AudioDeviceID) {
+        for selector in [kAudioDevicePropertyNominalSampleRate, kAudioDevicePropertyDeviceIsAlive] {
+            deviceListeners.append(addListener(id, selector) { [weak self] in
+                guard let self, self.openedDevice == id else { return }
+                self.start(uid: self.currentUID)
+            })
+        }
+    }
+
     private func listen(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
                         _ action: @escaping @MainActor () -> Void) {
+        listeners.append(addListener(object, selector, action))
+    }
+
+    private func addListener(_ object: AudioObjectID, _ selector: AudioObjectPropertySelector,
+                        _ action: @escaping @MainActor () -> Void)
+        -> (AudioObjectID, AudioObjectPropertyAddress, AudioObjectPropertyListenerBlock) {
         var addr = AudioObjectPropertyAddress(mSelector: selector,
                                               mScope: kAudioObjectPropertyScopeGlobal,
                                               mElement: kAudioObjectPropertyElementMain)
@@ -143,7 +169,7 @@ final class AudioInput: ObservableObject {
             DispatchQueue.main.async { MainActor.assumeIsolated { action() } }
         }
         AudioObjectAddPropertyListenerBlock(object, &addr, nil, block)
-        listeners.append((object, addr, block))
+        return (object, addr, block)
     }
 
     // MARK: - CoreAudio device list
@@ -233,37 +259,19 @@ private final class HALInput: @unchecked Sendable {
         var maybeUnit: AudioUnit?
         try check(AudioComponentInstanceNew(comp, &maybeUnit), "Create HAL")
         guard let unit = maybeUnit else { throw Failure(step: "Create HAL", status: -1) }
+
+        // Until every property is set, a throw skips deinit, so the unit is
+        // disposed here instead of leaking on every failed open.
+        let format: (channels: Int, sampleRate: Double, capacity: Int)
+        do {
+            format = try Self.configure(unit, device: device, check: check)
+        } catch {
+            AudioComponentInstanceDispose(unit)
+            throw error
+        }
         self.unit = unit
         self.analyzer = analyzer
-
-        let u32 = UInt32(MemoryLayout<UInt32>.size)
-        var one: UInt32 = 1, zero: UInt32 = 0
-        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &one, u32), "Enable input")
-        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &zero, u32), "Disable output")
-        var dev = device
-        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
-                                       &dev, UInt32(MemoryLayout<AudioDeviceID>.size)), "Select device")
-
-        // The device's own format on the input side of element 1…
-        var hw = AudioStreamBasicDescription()
-        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
-        try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &hw, &size), "Read format")
-        channels = max(1, Int(hw.mChannelsPerFrame))
-        sampleRate = hw.mSampleRate > 0 ? hw.mSampleRate : 48000
-
-        // …and what we want handed to us: float32, one buffer per channel.
-        var client = AudioStreamBasicDescription(
-            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
-            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
-            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
-            mChannelsPerFrame: UInt32(channels), mBitsPerChannel: 32, mReserved: 0)
-        try check(AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1,
-                                       &client, size), "Set format")
-
-        var maxFrames: UInt32 = 0
-        size = u32
-        AudioUnitGetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, &size)
-        capacity = max(Int(maxFrames), 4096)
+        (channels, sampleRate, capacity) = format
         buffers = AudioBufferList.allocate(maximumBuffers: channels)
         for i in 0..<channels {
             buffers[i] = AudioBuffer(mNumberChannels: 1, mDataByteSize: UInt32(capacity * 4),
@@ -278,6 +286,41 @@ private final class HALInput: @unchecked Sendable {
                                        &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size)), "Set callback")
         try check(AudioUnitInitialize(unit), "Initialise")
         try check(AudioOutputUnitStart(unit), "Start")
+    }
+
+    /// Input on, output off, the chosen device, and float32 non-interleaved
+    /// at the device's own rate and channel count.
+    private static func configure(_ unit: AudioUnit, device: AudioDeviceID,
+                                  check: (OSStatus, String) throws -> Void) throws
+        -> (channels: Int, sampleRate: Double, capacity: Int) {
+        let u32 = UInt32(MemoryLayout<UInt32>.size)
+        var one: UInt32 = 1, zero: UInt32 = 0
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Input, 1, &one, u32), "Enable input")
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_EnableIO, kAudioUnitScope_Output, 0, &zero, u32), "Disable output")
+        var dev = device
+        try check(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice, kAudioUnitScope_Global, 0,
+                                       &dev, UInt32(MemoryLayout<AudioDeviceID>.size)), "Select device")
+
+        // The device's own format on the input side of element 1…
+        var hw = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        try check(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Input, 1, &hw, &size), "Read format")
+        let channels = max(1, Int(hw.mChannelsPerFrame))
+        let sampleRate = hw.mSampleRate > 0 ? hw.mSampleRate : 48000
+
+        // …and what we want handed to us: float32, one buffer per channel.
+        var client = AudioStreamBasicDescription(
+            mSampleRate: sampleRate, mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked | kAudioFormatFlagIsNonInterleaved,
+            mBytesPerPacket: 4, mFramesPerPacket: 1, mBytesPerFrame: 4,
+            mChannelsPerFrame: UInt32(channels), mBitsPerChannel: 32, mReserved: 0)
+        try check(AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat, kAudioUnitScope_Output, 1,
+                                       &client, size), "Set format")
+
+        var maxFrames: UInt32 = 0
+        size = u32
+        AudioUnitGetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, &size)
+        return (channels, sampleRate, max(Int(maxFrames), 4096))
     }
 
     func stop() {

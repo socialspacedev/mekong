@@ -29,8 +29,8 @@ struct SceneEntry: Identifiable, Equatable {
 /// The folder is checked every second. When anything in it changes, the
 /// whole program is rebuilt off the main thread and swapped in, so a scene
 /// can be edited while it's on the wall. Each shader file is first compiled
-/// on its own; one that fails is listed with its error and left out rather
-/// than taking the others down.
+/// with the built-ins; one that fails is listed with its error and left out
+/// rather than taking the others down.
 @MainActor
 final class SceneLibrary: ObservableObject {
     static let shared = SceneLibrary()
@@ -58,7 +58,7 @@ final class SceneLibrary: ObservableObject {
 
     private init() {
         // Built-ins only to start with, so there is always a working pipeline.
-        let built = try! Self.build(customs: [], images: [], folder: nil)
+        let built = try! Self.build(customs: [], images: [], folder: nil)   // built-ins only: a bug if it fails
         pipeline = built.pipeline
         entries = built.entries
         createFolderIfNeeded()
@@ -224,13 +224,13 @@ final class SceneLibrary: ObservableObject {
 
     // MARK: - Building (any thread)
 
-    private struct Built {
+    struct Built {
         let pipeline: MTLRenderPipelineState
         let entries: [SceneEntry]
         let issues: [String: String]
     }
 
-    private nonisolated static func build(customs: [(file: String, code: String)], images: [String],
+    nonisolated static func build(customs: [(file: String, code: String)], images: [String],
                                           folder: URL?) throws -> Built {
         let device = MetalStage.shared.device
         var issues: [String: String] = [:]
@@ -238,22 +238,44 @@ final class SceneLibrary: ObservableObject {
             SceneEntry(id: $0.key, name: $0.name, blurb: $0.blurb, source: .builtin, code: $0.rawValue, texture: nil)
         }
 
-        // Shader files: probe each alone, keep the ones that compile.
-        var good: [(namespace: String, file: String, code: String)] = []
+        // Shader files: compile each with the built-ins, keep the ones that work.
+        // Testing inside the real program (not alone) catches a file whose
+        // #define breaks Mekong's own code, which would take every scene down.
+        func compile(_ files: [(file: String, code: String)]) throws -> MTLLibrary {
+            let wrapped = files.enumerated().map { ("user\($0.offset)", $0.element.file, $0.element.code) }
+            return try device.makeLibrary(source: Shaders.program(customs: wrapped), options: nil)
+        }
+        var candidates: [(file: String, code: String)] = []
         for c in customs {
             do {
-                _ = try device.makeLibrary(source: Shaders.probe(c.code, file: c.file), options: nil)
-                let index = good.count
-                good.append(("user\(index)", c.file, c.code))
-                let meta = Self.header(c.code)
-                entries.append(SceneEntry(id: "shader:\(c.file)",
-                                          name: meta.name ?? Self.title(c.file),
-                                          blurb: meta.blurb ?? "Custom scene from \(c.file).",
-                                          source: .shader, code: Shaders.Code.custom(index), texture: nil,
-                                          file: c.file))
+                _ = try compile([c])
+                candidates.append(c)
             } catch {
-                issues[c.file] = Self.firstError(error)
+                issues[c.file] = Self.explain(error, file: c.file)
             }
+        }
+        // Files that work alone can still clash with each other (one's
+        // #define breaking the next), so add them one at a time if they do.
+        var good = candidates
+        var lib = try? compile(good)
+        if lib == nil {
+            good = []
+            for c in candidates {
+                if let l = try? compile(good + [c]) {
+                    good.append(c)
+                    lib = l
+                } else {
+                    issues[c.file] = "Clashes with another scene file, so it's left out. Check for a #define or name they both use."
+                }
+            }
+        }
+        for (index, c) in good.enumerated() {
+            let meta = Self.header(c.code)
+            entries.append(SceneEntry(id: "shader:\(c.file)",
+                                      name: meta.name ?? Self.title(c.file),
+                                      blurb: meta.blurb ?? "Custom scene from \(c.file).",
+                                      source: .shader, code: Shaders.Code.custom(index), texture: nil,
+                                      file: c.file))
         }
 
         // Images, with an optional same-named .json beside them.
@@ -282,10 +304,10 @@ final class SceneLibrary: ObservableObject {
             }
         }
 
-        let lib = try device.makeLibrary(source: Shaders.program(customs: good), options: nil)
+        let library = try lib ?? compile([])
         let desc = MTLRenderPipelineDescriptor()
-        desc.vertexFunction = lib.makeFunction(name: "vmain")
-        desc.fragmentFunction = lib.makeFunction(name: "fmain")
+        desc.vertexFunction = library.makeFunction(name: "vmain")
+        desc.fragmentFunction = library.makeFunction(name: "fmain")
         desc.colorAttachments[0].pixelFormat = MetalStage.pixelFormat
         let pipeline = try device.makeRenderPipelineState(descriptor: desc)
         return Built(pipeline: pipeline, entries: entries, issues: issues)
@@ -313,12 +335,15 @@ final class SceneLibrary: ObservableObject {
         (file as NSString).deletingPathExtension
     }
 
-    /// The compiler's first error line, already pointing at the user's file
-    /// thanks to `#line` ("Tide.metal:12:5: error: …").
-    private nonisolated static func firstError(_ error: Error) -> String {
+    /// The compiler's first error line, pointing at the user's file thanks
+    /// to `#line` ("Tide.metal:12:5: error: …"). An error in Mekong's own code
+    /// means the file broke it, usually with a #define, so say that instead.
+    private nonisolated static func explain(_ error: Error, file: String) -> String {
         let text = (error as NSError).localizedDescription
         let lines = text.split(separator: "\n").map(String.init)
-        return lines.first(where: { $0.contains("error:") }) ?? lines.first ?? text
+        let first = lines.first(where: { $0.contains("error:") }) ?? lines.first ?? text
+        guard !first.contains(file), first.contains(Shaders.mekongFile) else { return first }
+        return "Breaks Mekong's built-in scenes, so it's left out. Check for a #define of a common name. (\(first))"
     }
 
     /// Downscaled to at most 2048 px (orientation applied) — plenty for a

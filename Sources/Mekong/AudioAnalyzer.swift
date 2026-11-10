@@ -51,6 +51,7 @@ final class AudioAnalyzer: @unchecked Sendable {
     private var bandRanges: [(Int, Int)] = []
     private var bandTilt: [Float] = []
     private var bands = [Float](repeating: 0, count: bandCount)
+    private var bandDb = [Float](repeating: 0, count: bandCount)
     private var prevBands = [Float](repeating: 0, count: bandCount)
     private var fluxHistory = [Float](repeating: 0, count: 48)
     private var fluxPos = 0
@@ -107,13 +108,16 @@ final class AudioAnalyzer: @unchecked Sendable {
     /// Audio-thread entry point from the input sink.
     func ingest(_ abl: UnsafePointer<AudioBufferList>, frames: Int) {
         let list = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: abl))
-        let channel = params.withLock { $0.channel }
 
         // Flatten whatever layout arrives (normally one buffer per channel)
         // into a list of (buffer, stride, offset) per channel.
         var totalChannels = 0
         for b in list { totalChannels += Int(b.mNumberChannels) }
         guard totalChannels > 0 else { return }
+        // A channel saved for another interface (channel 2 of 2, then the
+        // built-in mic) would match nothing and leave the input silent: mix instead.
+        var channel = params.withLock { $0.channel }
+        if channel >= totalChannels { channel = -1 }
 
         var done = 0
         while done < frames {
@@ -220,7 +224,6 @@ final class AudioAnalyzer: @unchecked Sendable {
 
         // Bands in dB, normalised against their own slowly-falling peak.
         var maxDb: Float = -200
-        var bandDb = [Float](repeating: 0, count: Self.bandCount)
         mags.withUnsafeBufferPointer { m in
             for k in 0..<Self.bandCount {
                 let (b0, b1) = bandRanges[k]

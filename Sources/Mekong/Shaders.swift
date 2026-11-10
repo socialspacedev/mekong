@@ -325,10 +325,15 @@ enum Shaders {
 
     /// One custom scene, wrapped in its own namespace so helper names in
     /// different files can't collide. `#line` makes compiler errors point at
-    /// the user's own file and line numbers.
+    /// the user's own file and line numbers, and the second one hands the
+    /// rest back to Mekong, so an error after the file isn't blamed on it.
     static func wrap(_ code: String, namespace: String, file: String) -> String {
-        "namespace \(namespace) {\n#line 1 \"\(file)\"\n\(code)\n}\n"
+        "namespace \(namespace) {\n#line 1 \"\(file)\"\n\(code)\n#line 1 \"\(mekongFile)\"\n}\n"
     }
+
+    /// The name compiler errors give Mekong's own code after a custom scene.
+    static let mekongFile = "Mekong"
+
 
     /// The complete program: prelude, built-ins, the given custom scenes, the
     /// dispatch and the fragment stage (CRT presence, crossfade, flash).
@@ -392,17 +397,6 @@ enum Shaders {
 
         col = mix(col, 1.0 - col, u.flash);
         return float4(clamp(col, 0.0, 1.0) * u.master, 1.0);
-    }
-    """
-    }
-
-    /// Just enough to check one custom scene compiles on its own, so a broken
-    /// file is reported and left out instead of breaking everything.
-    static func probe(_ code: String, file: String) -> String {
-        prelude + wrap(code, namespace: "probe", file: file) + """
-
-    fragment float4 probe_main(VOut in [[stage_in]], constant U& u [[buffer(0)]], constant float* b [[buffer(1)]]) {
-        return float4(probe::scene(in.pos.xy, u, b), 1.0);
     }
     """
     }
